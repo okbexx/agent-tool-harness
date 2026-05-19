@@ -3,11 +3,13 @@ from __future__ import annotations
 import hashlib
 import json
 import shlex
+import shutil
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .capabilities import DISTILL_CAPABILITY_SPECS
 from .models import Artifact, BackendSpec, HarnessResponse
 from .registry import DEFAULT_TOOLS
 
@@ -44,6 +46,86 @@ def tool_for_capability(capability_id: str):
             if capability.id == capability_id:
                 return tool, capability
     raise KeyError(capability_id)
+
+
+def doctor_tool_status(tool) -> dict[str, Any]:
+    checks: list[dict[str, Any]] = [
+        {"name": "registry_entry", "ok": True},
+        {"name": "json_contract", "ok": True},
+        {"name": "preview_protocol", "ok": True},
+    ]
+    if tool.name != "distill-vault":
+        return {
+            "name": tool.name,
+            "ok": True,
+            "side_effect": tool.side_effects.get("doctor", "none"),
+            "checks": checks,
+        }
+
+    distill_path = shutil.which("distill")
+    checks.append(
+        {
+            "name": "binary_available",
+            "ok": bool(distill_path),
+            "detail": distill_path or "distill not found on PATH",
+        }
+    )
+    if distill_path:
+        try:
+            help_result = subprocess.run(
+                [distill_path, "--help"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            checks.append(
+                {
+                    "name": "help_available",
+                    "ok": help_result.returncode == 0,
+                    "detail": (help_result.stderr or help_result.stdout).strip()[:240],
+                }
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            checks.append({"name": "help_available", "ok": False, "detail": str(exc)})
+    else:
+        checks.append({"name": "help_available", "ok": False, "detail": "distill missing"})
+
+    registry_by_id = {capability.id: capability for capability in tool.capabilities}
+    checks.append(
+        {
+            "name": "registry_backend_consistency",
+            "ok": set(registry_by_id) == set(DISTILL_CAPABILITY_SPECS)
+            and all(
+                capability.backend is not None
+                and capability.backend.target == "run_distill_command"
+                for capability in registry_by_id.values()
+            ),
+            "detail": (
+                f"{len(registry_by_id)} registry capabilities; "
+                f"{len(DISTILL_CAPABILITY_SPECS)} specs"
+            ),
+        }
+    )
+    external_write_ids = sorted(
+        capability.id
+        for capability in tool.capabilities
+        if capability.side_effect == "external_write"
+    )
+    checks.append(
+        {
+            "name": "external_write_gated",
+            "ok": bool(external_write_ids),
+            "detail": ", ".join(external_write_ids),
+        }
+    )
+
+    return {
+        "name": tool.name,
+        "ok": all(check["ok"] for check in checks),
+        "side_effect": tool.side_effects.get("doctor", "none"),
+        "checks": checks,
+    }
 
 
 def next_action_text(action: Any) -> str:
@@ -144,93 +226,7 @@ def run_xhs_generate_cards(input_path: Path, preview_dir: Path | None = None) ->
     )
 
 
-DISTILL_COMMANDS: dict[str, dict[str, Any]] = {
-    "distill.status": {
-        "args": ["status", "--format", "json"],
-        "artifact": "status.json",
-        "output": "json",
-        "side_effect": "local_files",
-    },
-    "distill.health": {
-        "args": ["health", "--format", "json"],
-        "artifact": "health.json",
-        "output": "json",
-        "side_effect": "local_files",
-    },
-    "distill.capabilities": {
-        "args": ["capabilities", "--format", "json"],
-        "artifact": "capabilities.json",
-        "output": "json",
-        "side_effect": "local_files",
-    },
-    "distill.instance-doctor": {
-        "args": ["doctor", "--instance-upgrade", "--format", "json"],
-        "artifact": "instance-doctor.json",
-        "output": "json",
-        "side_effect": "local_files",
-    },
-    "distill.upgrade-plan": {
-        "args": ["upgrade-plan", "--format", "json"],
-        "artifact": "upgrade-plan.json",
-        "output": "json",
-        "side_effect": "local_files",
-    },
-    "distill.lint-check": {
-        "args": ["lint", "--format", "json"],
-        "artifact": "lint-check.json",
-        "output": "json",
-        "side_effect": "local_files",
-    },
-    "distill.lint-fix": {
-        "args": ["lint", "--fix", "--format", "json"],
-        "artifact": "lint-fix.json",
-        "output": "json",
-        "side_effect": "external_write",
-    },
-    "distill.promote-dry-run": {
-        "args": ["promote", "--dry-run", "--format", "json"],
-        "artifact": "promote-dry-run.txt",
-        "output": "json_or_stdout",
-        "side_effect": "local_files",
-    },
-    "distill.promote-auto": {
-        "args": ["promote", "--auto", "--format", "json"],
-        "artifact": "promote-auto.json",
-        "output": "json",
-        "side_effect": "external_write",
-    },
-    "distill.pipeline-run": {
-        "args": ["run", "--format", "json"],
-        "artifact": "pipeline-run.json",
-        "output": "json",
-        "side_effect": "local_files",
-    },
-    "distill.route": {
-        "artifact": "route.json",
-        "output": "json",
-        "side_effect": "local_files",
-    },
-    "distill.plan": {
-        "artifact": "plan.json",
-        "output": "json",
-        "side_effect": "local_files",
-    },
-    "distill.capture": {
-        "artifact": "capture.json",
-        "output": "json",
-        "side_effect": "external_write",
-    },
-    "distill.apply": {
-        "artifact": "apply.json",
-        "output": "json",
-        "side_effect": "external_write",
-    },
-    "distill.search": {
-        "artifact": "search.txt",
-        "output": "text",
-        "side_effect": "local_files",
-    },
-}
+DISTILL_COMMANDS = DISTILL_CAPABILITY_SPECS
 
 
 def distill_command_args(capability_id: str, data: dict[str, Any]) -> list[str]:
@@ -259,7 +255,7 @@ def distill_command_args(capability_id: str, data: dict[str, Any]) -> list[str]:
     spec = DISTILL_COMMANDS.get(capability_id)
     if not spec:
         raise KeyError(capability_id)
-    args = list(spec.get("args") or [])
+    args = list(spec.args)
     if capability_id == "distill.pipeline-run":
         if data.get("incremental"):
             args.append("--incremental")
@@ -297,6 +293,22 @@ def distill_next_actions(payload: Any) -> list[str]:
     return []
 
 
+def parse_distill_json_output(stdout: str) -> Any:
+    try:
+        return json.loads(stdout)
+    except json.JSONDecodeError as original_exc:
+        decoder = json.JSONDecoder()
+        for idx, char in enumerate(stdout):
+            if char not in "[{":
+                continue
+            try:
+                payload, _end = decoder.raw_decode(stdout[idx:])
+                return payload
+            except json.JSONDecodeError:
+                continue
+        raise original_exc
+
+
 def run_distill_command(
     capability_id: str,
     input_path: Path,
@@ -329,13 +341,27 @@ def run_distill_command(
             "Run registry list --json",
         )
 
-    completed = subprocess.run(
-        ["distill", "-v", str(vault), *distill_args],
-        capture_output=True,
-        text=True,
-        timeout=int(data.get("timeout_seconds") or 300),
-        check=False,
-    )
+    timeout_seconds = int(data.get("timeout_seconds") or 300)
+    try:
+        completed = subprocess.run(
+            ["distill", "-v", str(vault), *distill_args],
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return HarnessResponse.failure(
+            "backend_timeout",
+            f"{capability_id} timed out after {timeout_seconds} seconds",
+            "Increase timeout_seconds or run the distill command directly for details",
+        )
+    except OSError as exc:
+        return HarnessResponse.failure(
+            "backend_launch_failed",
+            str(exc),
+            "Install distill or fix PATH before rerunning",
+        )
     if completed.returncode != 0:
         return HarnessResponse.failure(
             "backend_failed",
@@ -343,10 +369,10 @@ def run_distill_command(
             "Run the distill command directly for details",
         )
 
-    output_kind = str(spec.get("output") or "json")
+    output_kind = spec.output
     if output_kind in {"json", "json_or_stdout"}:
         try:
-            payload: Any = json.loads(completed.stdout)
+            payload: Any = parse_distill_json_output(completed.stdout)
         except json.JSONDecodeError:
             if output_kind == "json_or_stdout":
                 payload = completed.stdout
@@ -368,7 +394,7 @@ def run_distill_command(
     artifacts_dir = bundle_dir / "artifacts"
     artifacts_dir.mkdir(parents=True, exist_ok=False)
 
-    artifact_name = str(spec["artifact"])
+    artifact_name = spec.artifact
     artifact_path = artifacts_dir / artifact_name
     if output_kind == "json":
         artifact_path.write_text(
@@ -475,6 +501,28 @@ def inspect_preview_bundle(bundle_dir: Path) -> HarnessResponse:
             "manifest.json artifacts must be a list",
             "Regenerate the preview bundle",
         )
+    bundle_root = bundle_dir.expanduser().resolve()
+    for artifact in artifacts:
+        if not isinstance(artifact, dict) or not artifact.get("path"):
+            return HarnessResponse.failure(
+                "invalid_bundle",
+                "manifest.json artifact entries must include path",
+                "Regenerate the preview bundle",
+            )
+        artifact_relpath = str(artifact["path"])
+        artifact_path = (bundle_root / artifact_relpath).resolve()
+        if not artifact_path.is_relative_to(bundle_root):
+            return HarnessResponse.failure(
+                "invalid_bundle",
+                f"Preview bundle artifact path escapes bundle: {artifact_relpath}",
+                "Regenerate the preview bundle",
+            )
+        if not artifact_path.exists():
+            return HarnessResponse.failure(
+                "invalid_bundle",
+                f"Preview bundle artifact path does not exist: {artifact_relpath}",
+                "Regenerate the preview bundle",
+            )
 
     return HarnessResponse.success(
         data={
@@ -583,7 +631,22 @@ def run_capability(
     capability_id: str,
     input_path: Path,
     preview_dir: Path | None = None,
+    allow_external_write: bool = False,
 ) -> HarnessResponse:
+    try:
+        _, capability = tool_for_capability(capability_id)
+    except KeyError:
+        return HarnessResponse.failure(
+            "unknown_capability",
+            f"Unsupported capability: {capability_id}",
+            "Run registry list --json",
+        )
+    if capability.side_effect == "external_write" and not allow_external_write:
+        return HarnessResponse.failure(
+            "unsafe_side_effect",
+            f"Capability {capability_id} has side effect external_write",
+            "Re-run with --allow-external-write only after explicit user approval",
+        )
     if capability_id == "xhs.generate-cards":
         return run_xhs_generate_cards(input_path=input_path, preview_dir=preview_dir)
     if capability_id in DISTILL_COMMANDS:

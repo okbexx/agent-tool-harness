@@ -26,7 +26,7 @@ Failures return:
 - `run distill.<surface> <input.json> --preview-dir <dir> --json`: run distill-vault CLI surfaces and bundle their outputs
 - `inspect <preview-bundle-dir> --json`: summarize a generated preview bundle for review
 - `run-backend <capability> <input.json> --backend-json <BackendSpec> --json`: run an explicit backend adapter
-- `skill export xhs.generate-cards --json`: generate an agent-readable `SKILL.md`
+- `skill export <capability-or-tool> --json`: generate an agent-readable `SKILL.md`
 
 The current XHS backend intentionally emits Markdown preview artifacts. The production image backend can replace it later while keeping the JSON and `preview-bundle/v1` contract stable. Distill capabilities are the first real self-use backend family: they shell out to the local `distill` CLI and bundle outputs for inspection.
 
@@ -65,7 +65,9 @@ All distill inputs include a vault path:
 
 Route/plan/capture/apply also require `intent`; search requires `query`.
 
-The harness runs the corresponding `distill` command and writes a `distill-vault` preview bundle with a command-specific artifact such as `health.json`, `route.json`, or `search.txt`. For write-capable capabilities, inspect the registry metadata first and use them deliberately.
+The harness runs the corresponding `distill` command and writes a `distill-vault` preview bundle with a command-specific artifact such as `health.json`, `route.json`, or `search.txt`. Capabilities marked `external_write` are blocked by default; run them only after explicit approval with `--allow-external-write`.
+
+Distill capability metadata lives in `src/agent_tool_harness/capabilities.py` and is reused by both the registry and backend dispatch to avoid drift. See `docs/distill-vault-harness-runbook.md` for the self-use runbook.
 
 ## Backend adapters
 
@@ -107,6 +109,7 @@ printf '{"vault":"/home/jarl/all_in_one"}' > /tmp/distill-health-input.json
 agent-tool-harness run distill.health /tmp/distill-health-input.json --preview-dir /tmp/ath-preview --json
 agent-tool-harness inspect /tmp/ath-preview/xhs-image-cards/<bundle-name> --json
 agent-tool-harness skill export xhs.generate-cards --json
+agent-tool-harness skill export distill-vault --json
 ```
 
 Alias:

@@ -8,6 +8,7 @@ import typer
 from rich.console import Console
 
 from .backends import (
+    doctor_tool_status,
     inspect_preview_bundle,
     run_capability,
     run_subprocess_backend,
@@ -15,7 +16,7 @@ from .backends import (
 )
 from .models import BackendSpec, HarnessResponse
 from .registry import DEFAULT_TOOLS
-from .skill_export import render_skill
+from .skill_export import render_skill, render_tool_skill
 
 app = typer.Typer(help="Agent Tool Harness: stable contracts for agent-callable internal tools.")
 registry_app = typer.Typer(help="Inspect registered tools and capabilities.")
@@ -73,20 +74,7 @@ def doctor(
         )
         raise typer.Exit(2)
 
-    statuses = []
-    for tool in selected:
-        statuses.append(
-            {
-                "name": tool.name,
-                "ok": True,
-                "side_effect": tool.side_effects.get("doctor", "none"),
-                "checks": [
-                    {"name": "registry_entry", "ok": True},
-                    {"name": "json_contract", "ok": True},
-                    {"name": "preview_protocol", "ok": True},
-                ],
-            }
-        )
+    statuses = [doctor_tool_status(tool) for tool in selected]
     emit(HarnessResponse.success(data={"statuses": statuses}), as_json=as_json)
 
 
@@ -102,9 +90,21 @@ def run(
         ),
     ] = None,
     as_json: Annotated[bool, typer.Option("--json", help="Emit JSON envelope.")] = False,
+    allow_external_write: Annotated[
+        bool,
+        typer.Option(
+            "--allow-external-write",
+            help="Allow capabilities marked external_write after explicit user approval.",
+        ),
+    ] = False,
 ) -> None:
     """Run a capability and emit a stable JSON envelope."""
-    response = run_capability(capability_id, input_path=input_path, preview_dir=preview_dir)
+    response = run_capability(
+        capability_id,
+        input_path=input_path,
+        preview_dir=preview_dir,
+        allow_external_write=allow_external_write,
+    )
     emit(response, as_json=as_json)
     if not response.ok:
         raise typer.Exit(1)
@@ -165,10 +165,20 @@ def inspect(
 
 @skill_app.command("export")
 def skill_export(
-    capability_id: Annotated[str, typer.Argument(help="Capability id to export as SKILL.md.")],
+    capability_id: Annotated[
+        str,
+        typer.Argument(help="Capability id or tool name to export as SKILL.md."),
+    ],
     as_json: Annotated[bool, typer.Option("--json", help="Emit JSON envelope.")] = False,
 ) -> None:
-    """Generate an agent-readable SKILL.md from capability metadata."""
+    """Generate an agent-readable SKILL.md from capability or tool metadata."""
+    for tool in DEFAULT_TOOLS:
+        if tool.name == capability_id:
+            emit(
+                HarnessResponse.success(data={"skill_md": render_tool_skill(tool)}),
+                as_json=as_json,
+            )
+            return
     try:
         tool, capability = tool_for_capability(capability_id)
     except KeyError:

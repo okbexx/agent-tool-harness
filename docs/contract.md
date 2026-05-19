@@ -41,6 +41,14 @@ Runs health checks that must not write files, call paid APIs, publish content, o
 
 Runs one capability. File-producing capabilities should emit `artifacts[]` pointing to a preview bundle.
 
+Capabilities marked `external_write` are blocked by default. They require explicit user approval and the `--allow-external-write` flag:
+
+```bash
+ath run distill.capture input.json --preview-dir .preview --allow-external-write --json
+```
+
+Without the flag, the harness returns `unsafe_side_effect` and does not invoke the backend.
+
 ### `run-backend CAPABILITY INPUT --backend-json JSON --preview-dir DIR --json`
 
 Runs one capability through an explicit backend adapter before promoting that adapter into the registry. This is useful for testing real CLIs behind the harness contract.
@@ -62,9 +70,9 @@ The harness calls `inspect` internally and only returns success when the bundle 
 
 Reads `manifest.json` and `summary.json` from a generated preview bundle and returns a compact review payload. Agents should inspect before publishing, committing, or handing off generated artifacts.
 
-### `skill export CAPABILITY --json`
+### `skill export CAPABILITY_OR_TOOL --json`
 
-Generates a `SKILL.md` from capability metadata so agents can use the tool without hand-written instructions.
+Generates a `SKILL.md` from capability metadata or a tool-level runbook such as `distill-vault`.
 
 ### Distill capability family
 
@@ -96,6 +104,8 @@ distill.apply
 ```
 
 Each run writes a `preview-bundle/v1` under `.preview/distill-vault/` with a command-specific artifact (`status.json`, `health.json`, `route.json`, `search.txt`, etc.). The bundle can then be reviewed through `inspect`.
+
+`distill.*` capability specs are defined once in `src/agent_tool_harness/capabilities.py`; registry metadata and backend command dispatch both consume that definition.
 
 Example:
 

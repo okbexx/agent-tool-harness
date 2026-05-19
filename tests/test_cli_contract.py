@@ -5,6 +5,8 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
+from agent_tool_harness import backends
+from agent_tool_harness.capabilities import DISTILL_CAPABILITY_SPECS
 from agent_tool_harness.cli import app
 
 
@@ -88,6 +90,42 @@ def test_doctor_all_reports_no_side_effect_checks():
         "registry_entry",
         "json_contract",
         "preview_protocol",
+    }
+
+
+def test_doctor_distill_vault_runs_deep_backend_checks():
+    result = runner.invoke(app, ["doctor", "distill-vault", "--json"])
+
+    payload = parse_json(result)
+    status = payload["data"]["statuses"][0]
+    assert status["name"] == "distill-vault"
+    assert status["ok"] is True
+    checks = {check["name"]: check for check in status["checks"]}
+    assert checks["binary_available"]["ok"] is True
+    assert checks["help_available"]["ok"] is True
+    assert checks["external_write_gated"]["ok"] is True
+    assert checks["registry_backend_consistency"]["ok"] is True
+    assert checks["preview_protocol"]["ok"] is True
+
+
+def test_doctor_distill_vault_reports_missing_binary(monkeypatch):
+    monkeypatch.setattr(backends.shutil, "which", lambda _name: None)
+
+    result = runner.invoke(app, ["doctor", "distill-vault", "--json"])
+
+    payload = parse_json(result)
+    status = payload["data"]["statuses"][0]
+    assert status["ok"] is False
+    checks = {check["name"]: check for check in status["checks"]}
+    assert checks["binary_available"] == {
+        "name": "binary_available",
+        "ok": False,
+        "detail": "distill not found on PATH",
+    }
+    assert checks["help_available"] == {
+        "name": "help_available",
+        "ok": False,
+        "detail": "distill missing",
     }
 
 
@@ -254,6 +292,40 @@ def test_inspect_preview_bundle_returns_manifest_and_summary(tmp_path):
     ]
 
 
+def test_inspect_preview_bundle_rejects_missing_artifact_file(tmp_path):
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    (bundle_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "protocol_version": "preview-bundle/v1",
+                "tool": "fake-tool",
+                "capability": "fake.generate",
+                "status": "ok",
+                "summary_path": "summary.json",
+                "artifacts": [
+                    {"id": "missing", "kind": "text", "path": "artifacts/missing.txt"}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (bundle_dir / "summary.json").write_text(
+        json.dumps({"headline": "Fake", "facts": {}, "warnings": [], "next_actions": []}),
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, ["inspect", str(bundle_dir), "--json"])
+
+    assert result.exit_code == 1
+    payload = json.loads(result.output)
+    assert payload["error"] == {
+        "type": "invalid_bundle",
+        "message": "Preview bundle artifact path does not exist: artifacts/missing.txt",
+        "fix": "Regenerate the preview bundle",
+    }
+
+
 def test_subprocess_backend_runs_declared_command_and_returns_bundle(tmp_path):
     script_path = tmp_path / "fake_backend.py"
     script_path.write_text(
@@ -355,6 +427,159 @@ def test_subprocess_backend_requires_preview_bundle_artifact(tmp_path):
     assert payload["error"]["fix"] == "Backend must print JSON with bundle_dir"
 
 
+def test_registry_and_backend_distill_capabilities_share_same_specs():
+    result = runner.invoke(app, ["registry", "list", "--json"])
+
+    payload = parse_json(result)
+    distill_tool = next(
+        tool for tool in payload["data"]["tools"] if tool["name"] == "distill-vault"
+    )
+    registry_by_id = {
+        capability["id"]: capability for capability in distill_tool["capabilities"]
+    }
+
+    assert set(registry_by_id) == set(DISTILL_CAPABILITY_SPECS)
+    for capability_id, spec in DISTILL_CAPABILITY_SPECS.items():
+        assert registry_by_id[capability_id]["side_effect"] == spec.side_effect
+        assert registry_by_id[capability_id]["backend"]["target"] == "run_distill_command"
+
+
+def test_external_write_capability_is_blocked_without_allow_flag(tmp_path):
+    vault = tmp_path / "vault"
+    write_minimal_distill_vault(vault)
+    input_path = tmp_path / "distill-lint-fix-input.json"
+    input_path.write_text(json.dumps({"vault": str(vault)}), encoding="utf-8")
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "distill.lint-fix",
+            str(input_path),
+            "--preview-dir",
+            str(tmp_path / "preview"),
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 1
+    payload = json.loads(result.output)
+    assert payload["ok"] is False
+    assert payload["error"] == {
+        "type": "unsafe_side_effect",
+        "message": "Capability distill.lint-fix has side effect external_write",
+        "fix": "Re-run with --allow-external-write only after explicit user approval",
+    }
+    assert not (tmp_path / "preview").exists()
+
+
+def test_external_write_capability_runs_with_allow_flag(tmp_path):
+    vault = tmp_path / "vault"
+    write_minimal_distill_vault(vault)
+    input_path = tmp_path / "distill-capture-input.json"
+    input_path.write_text(
+        json.dumps(
+            {
+                "vault": str(vault),
+                "intent": "记录测试进展",
+                "project": "示例项目",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "distill.capture",
+            str(input_path),
+            "--preview-dir",
+            str(tmp_path / "preview"),
+            "--allow-external-write",
+            "--json",
+        ],
+    )
+
+    payload = parse_json(result)
+    assert payload["ok"] is True
+    assert payload["data"]["capability"] == "distill.capture"
+    bundle_dir = Path(payload["artifacts"][0]["path"])
+    assert (bundle_dir / "manifest.json").exists()
+    assert (bundle_dir / "artifacts" / "capture.json").exists()
+
+
+def test_lint_fix_with_prefixed_json_runs_with_allow_flag(tmp_path):
+    vault = tmp_path / "vault"
+    write_minimal_distill_vault(vault)
+    input_path = tmp_path / "distill-lint-fix-input.json"
+    input_path.write_text(json.dumps({"vault": str(vault)}), encoding="utf-8")
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "distill.lint-fix",
+            str(input_path),
+            "--preview-dir",
+            str(tmp_path / "preview"),
+            "--allow-external-write",
+            "--json",
+        ],
+    )
+
+    payload = parse_json(result)
+    assert payload["ok"] is True
+    assert payload["data"]["capability"] == "distill.lint-fix"
+    bundle_dir = Path(payload["artifacts"][0]["path"])
+    lint_fix = json.loads((bundle_dir / "artifacts" / "lint-fix.json").read_text(encoding="utf-8"))
+    assert lint_fix["total_objects"] >= 1
+
+
+def test_run_distill_missing_binary_returns_structured_error(tmp_path, monkeypatch):
+    vault = tmp_path / "vault"
+    write_minimal_distill_vault(vault)
+    input_path = tmp_path / "distill-health-input.json"
+    input_path.write_text(json.dumps({"vault": str(vault)}), encoding="utf-8")
+
+    def raise_missing_binary(*_args, **_kwargs):
+        raise FileNotFoundError("distill")
+
+    monkeypatch.setattr(backends.subprocess, "run", raise_missing_binary)
+
+    result = runner.invoke(app, ["run", "distill.health", str(input_path), "--json"])
+
+    assert result.exit_code == 1
+    payload = json.loads(result.output)
+    assert payload["error"] == {
+        "type": "backend_launch_failed",
+        "message": "distill",
+        "fix": "Install distill or fix PATH before rerunning",
+    }
+
+
+def test_run_distill_timeout_returns_structured_error(tmp_path, monkeypatch):
+    vault = tmp_path / "vault"
+    write_minimal_distill_vault(vault)
+    input_path = tmp_path / "distill-health-input.json"
+    input_path.write_text(json.dumps({"vault": str(vault), "timeout_seconds": 7}), encoding="utf-8")
+
+    def raise_timeout(*_args, **_kwargs):
+        raise backends.subprocess.TimeoutExpired(cmd=["distill"], timeout=7)
+
+    monkeypatch.setattr(backends.subprocess, "run", raise_timeout)
+
+    result = runner.invoke(app, ["run", "distill.health", str(input_path), "--json"])
+
+    assert result.exit_code == 1
+    payload = json.loads(result.output)
+    assert payload["error"] == {
+        "type": "backend_timeout",
+        "message": "distill.health timed out after 7 seconds",
+        "fix": "Increase timeout_seconds or run the distill command directly for details",
+    }
+
+
 def test_run_unknown_capability_returns_structured_error():
     result = runner.invoke(
         app,
@@ -387,3 +612,16 @@ def test_skill_export_is_generated_from_metadata():
     assert "## JSON output" in skill
     assert "## Artifacts" in skill
     assert "## Verification" in skill
+
+
+def test_tool_skill_export_guides_distill_harness_usage():
+    result = runner.invoke(app, ["skill", "export", "distill-vault", "--json"])
+
+    payload = parse_json(result)
+    skill = payload["data"]["skill_md"]
+    assert "name: distill-vault-harness" in skill
+    assert "ath doctor distill-vault --json" in skill
+    assert "ath run distill.route" in skill
+    assert "ath inspect" in skill
+    assert "--allow-external-write" in skill
+    assert "Do not run external_write capabilities without explicit user approval" in skill
