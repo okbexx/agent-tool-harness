@@ -6,7 +6,7 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from agent_tool_harness import backends
-from agent_tool_harness.capabilities import DISTILL_CAPABILITY_SPECS
+from agent_tool_harness.capabilities import DISTILL_CAPABILITY_SPECS, XHS_CAPABILITY_SPECS
 from agent_tool_harness.cli import app
 
 
@@ -28,6 +28,50 @@ def write_minimal_distill_vault(path: Path) -> None:
     )
 
 
+def write_xhs_pending(path: Path, with_images: bool = False) -> list[str]:
+    image_paths: list[str] = []
+    if with_images:
+        image_dir = path.parent / "cards"
+        image_dir.mkdir()
+        for name in [
+            "01-cover.png",
+            "02-content-top3.png",
+            "03-content-mid.png",
+            "04-ending-cta.png",
+        ]:
+            image_path = image_dir / name
+            image_path.write_bytes(b"fake png")
+            image_paths.append(str(image_path))
+    path.write_text(
+        json.dumps(
+            {
+                "title": "05月18日GitHub热榜🔥",
+                "body": (
+                    "📅 05月18日 GitHub Trending 日榜\n\n"
+                    "🥇 openhuman\nAI project\nRust · 今日 +3,941⭐"
+                ),
+                "summary": "GitHub日榜: openhuman 等项目",
+                "tags": ["GitHub", "开源项目"],
+                "images": image_paths,
+                "has_images": bool(image_paths),
+                "trend_summary": {"date": "05月18日", "trend_keywords": "AI Agent"},
+                "repos": [
+                    {
+                        "repo": "tinyhumansai/openhuman",
+                        "desc": "Your Personal AI super intelligence.",
+                        "lang": "Rust",
+                        "today_stars": "3,941",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return image_paths
+
+
 runner = CliRunner()
 
 
@@ -47,7 +91,7 @@ def test_registry_list_exposes_capability_metadata():
     assert tools[0]["capabilities"][0]["id"] == "xhs.generate-cards"
     assert tools[0]["capabilities"][0]["side_effect"] == "local_files"
     assert tools[0]["capabilities"][0]["backend"]["kind"] == "python_function"
-    assert tools[0]["capabilities"][0]["backend"]["target"] == "run_xhs_generate_cards"
+    assert tools[0]["capabilities"][0]["backend"]["target"] == "run_xhs_command"
     assert tools[0]["healthcheck"] == "agent-tool-harness doctor xhs-image-cards --json"
     distill_tool = tools[1]
     assert distill_tool["name"] == "distill-vault"
@@ -93,6 +137,22 @@ def test_doctor_all_reports_no_side_effect_checks():
     }
 
 
+def test_doctor_xhs_image_cards_runs_script_and_gate_checks():
+    result = runner.invoke(app, ["doctor", "xhs-image-cards", "--json"])
+
+    payload = parse_json(result)
+    status = payload["data"]["statuses"][0]
+    assert status["name"] == "xhs-image-cards"
+    assert status["ok"] is True
+    checks = {check["name"]: check for check in status["checks"]}
+    assert checks["script_generate_cards"]["ok"] is True
+    assert checks["script_image_qa"]["ok"] is True
+    assert checks["script_finalize_preview"]["ok"] is True
+    assert checks["script_publish_xhs"]["ok"] is True
+    assert checks["registry_backend_consistency"]["ok"] is True
+    assert checks["external_write_gated"]["ok"] is True
+
+
 def test_doctor_distill_vault_runs_deep_backend_checks():
     result = runner.invoke(app, ["doctor", "distill-vault", "--json"])
 
@@ -129,8 +189,36 @@ def test_doctor_distill_vault_reports_missing_binary(monkeypatch):
     }
 
 
-def test_run_generate_cards_creates_preview_bundle(tmp_path):
-    input_path = Path("examples/github-trending.json")
+def test_run_generate_cards_creates_preview_bundle(tmp_path, monkeypatch):
+    pending = tmp_path / "pending.json"
+    write_xhs_pending(pending, with_images=False)
+    fake_script = tmp_path / "generate_xhs_cards.py"
+    fake_script.write_text(
+        """
+import json
+import sys
+from pathlib import Path
+pending = Path(sys.argv[1])
+data = json.loads(pending.read_text(encoding='utf-8'))
+out = pending.parent / 'generated-cards'
+out.mkdir(exist_ok=True)
+images = []
+for name in ['01-cover.png', '02-content-top3.png', '03-content-mid.png', '04-ending-cta.png']:
+    path = out / name
+    path.write_bytes(b'fake png')
+    images.append(str(path))
+data['images'] = images
+data['has_images'] = True
+pending.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
+print('---CARD_IMAGES---')
+for image in images:
+    print(image)
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setitem(backends.XHS_SCRIPT_PATHS, "script_generate_cards", fake_script)
+    input_path = tmp_path / "xhs-generate-input.json"
+    input_path.write_text(json.dumps({"pending_file": str(pending)}), encoding="utf-8")
     preview_dir = tmp_path / "preview"
 
     result = runner.invoke(
@@ -147,20 +235,286 @@ def test_run_generate_cards_creates_preview_bundle(tmp_path):
 
     payload = parse_json(result)
     assert payload["ok"] is True
-    assert payload["data"]["card_count"] == 3
+    assert payload["data"]["image_count"] == 4
+    assert payload["data"]["pending_file"] == str(pending.resolve())
     bundle_dir = Path(payload["artifacts"][0]["path"])
-    assert bundle_dir.exists()
     manifest = json.loads((bundle_dir / "manifest.json").read_text(encoding="utf-8"))
     summary = json.loads((bundle_dir / "summary.json").read_text(encoding="utf-8"))
+    artifact = json.loads(
+        (bundle_dir / "artifacts" / "generate-cards.json").read_text(encoding="utf-8")
+    )
     assert manifest["protocol_version"] == "preview-bundle/v1"
     assert manifest["capability"] == "xhs.generate-cards"
-    assert manifest["tool"] == "xhs-image-cards"
-    assert [artifact["id"] for artifact in manifest["artifacts"]] == [
-        "card-01",
-        "card-02",
-        "card-03",
-    ]
-    assert summary["headline"] == "Generated 3 preview cards"
+    assert summary["facts"]["image_count"] == 4
+    assert artifact["images"] == json.loads(pending.read_text(encoding="utf-8"))["images"]
+
+
+def test_xhs_image_qa_bundles_rule_result_even_when_blocked(tmp_path, monkeypatch):
+    pending = tmp_path / "pending.json"
+    write_xhs_pending(pending, with_images=True)
+    fake_script = tmp_path / "xhs_image_qa.py"
+    fake_script.write_text(
+        """
+import json
+import sys
+print(json.dumps({
+    'ok': False,
+    'artifact_dir': '/tmp/cards',
+    'warnings': ['bottom_safe_padding_too_small'],
+    'next_action': '先修复 warnings，再做视觉抽查',
+    'target': sys.argv[1],
+}, ensure_ascii=False))
+sys.exit(1)
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setitem(backends.XHS_SCRIPT_PATHS, "script_image_qa", fake_script)
+    input_path = tmp_path / "xhs-qa-input.json"
+    input_path.write_text(json.dumps({"target": str(pending)}), encoding="utf-8")
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "xhs.image-qa",
+            str(input_path),
+            "--preview-dir",
+            str(tmp_path / "preview"),
+            "--json",
+        ],
+    )
+
+    payload = parse_json(result)
+    assert payload["ok"] is True
+    assert payload["data"]["capability"] == "xhs.image-qa"
+    assert payload["data"]["status"] == "needs_attention"
+    assert payload["data"]["qa_exit_code"] == 1
+    assert payload["warnings"] == ["bottom_safe_padding_too_small"]
+    bundle_dir = Path(payload["artifacts"][0]["path"])
+    artifact = json.loads((bundle_dir / "artifacts" / "image-qa.json").read_text(encoding="utf-8"))
+    assert artifact["qa"]["warnings"] == ["bottom_safe_padding_too_small"]
+
+
+def test_xhs_finalize_preview_bundles_blocked_preview(tmp_path, monkeypatch):
+    pending = tmp_path / "pending.json"
+    write_xhs_pending(pending, with_images=True)
+    fake_script = tmp_path / "xhs_finalize_preview.py"
+    fake_script.write_text(
+        """
+import json
+import sys
+print(json.dumps({
+    'ok': True,
+    'pending_file': sys.argv[1],
+    'allow_preview': False,
+    'block_text': 'QA 未通过，已拦截预览发送',
+    'image_paths': [],
+    'gate': {'reasons': ['missing_required_pngs']},
+}, ensure_ascii=False))
+sys.exit(1)
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setitem(backends.XHS_SCRIPT_PATHS, "script_finalize_preview", fake_script)
+    input_path = tmp_path / "xhs-finalize-input.json"
+    input_path.write_text(json.dumps({"pending_file": str(pending)}), encoding="utf-8")
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "xhs.finalize-preview",
+            str(input_path),
+            "--preview-dir",
+            str(tmp_path / "preview"),
+            "--json",
+        ],
+    )
+
+    payload = parse_json(result)
+    assert payload["ok"] is True
+    assert payload["data"]["capability"] == "xhs.finalize-preview"
+    assert payload["data"]["status"] == "blocked"
+    assert payload["data"]["allow_preview"] is False
+    bundle_dir = Path(payload["artifacts"][0]["path"])
+    artifact = json.loads(
+        (bundle_dir / "artifacts" / "finalize-preview.json").read_text(encoding="utf-8")
+    )
+    assert artifact["preview"]["block_text"] == "QA 未通过，已拦截预览发送"
+
+
+def test_xhs_publish_is_external_write_blocked_by_default(tmp_path):
+    pending = tmp_path / "pending.json"
+    write_xhs_pending(pending, with_images=True)
+    input_path = tmp_path / "publish-input.json"
+    input_path.write_text(json.dumps({"pending_file": str(pending)}), encoding="utf-8")
+
+    result = runner.invoke(app, ["run", "xhs.publish", str(input_path), "--json"])
+
+    assert result.exit_code == 1
+    payload = json.loads(result.output)
+    assert payload["ok"] is False
+    assert payload["error"]["type"] == "unsafe_side_effect"
+    assert "--allow-external-write" in payload["error"]["fix"]
+
+
+def test_xhs_bundle_redacts_sensitive_values_from_artifacts(tmp_path):
+    input_path = tmp_path / "input.json"
+    input_path.write_text(
+        json.dumps({"api_key": "SECRETINPUT", "nested": {"token": "SECRETTOKEN"}}),
+        encoding="utf-8",
+    )
+
+    response = backends.write_xhs_bundle(
+        capability_id="xhs.image-qa",
+        input_path=input_path,
+        input_data={"api_key": "SECRETINPUT", "nested": {"token": "SECRETTOKEN"}},
+        payload={
+            "status": "needs_attention",
+            "qa": {
+                "authorization": "Bearer SECRETBEARER",
+                "log": "api_key=SECRETINLINE token:SECRETCOLON",
+            },
+        },
+        preview_dir=tmp_path / "preview",
+    )
+
+    assert response.ok is True
+    bundle_dir = Path(response.artifacts[0].path)
+    bundle_text = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in [
+            bundle_dir / "manifest.json",
+            bundle_dir / "summary.json",
+            bundle_dir / "artifacts" / "image-qa.json",
+        ]
+    )
+    assert "SECRETINPUT" not in bundle_text
+    assert "SECRETTOKEN" not in bundle_text
+    assert "SECRETBEARER" not in bundle_text
+    assert "SECRETINLINE" not in bundle_text
+    assert "SECRETCOLON" not in bundle_text
+    assert "[REDACTED]" in bundle_text
+
+
+def test_site_bundle_redacts_sensitive_values_from_artifacts(tmp_path):
+    input_path = tmp_path / "site-input.json"
+    input_path.write_text(json.dumps({"token": "SITETOKEN"}), encoding="utf-8")
+
+    response = backends.write_site_bundle(
+        capability_id="site.build",
+        input_path=input_path,
+        input_data={"token": "SITETOKEN"},
+        payload={
+            "returncode": 0,
+            "stdout": "authorization: Bearer SITEBEARER",
+            "stderr": "password=SITEPASSWORD",
+        },
+        preview_dir=tmp_path / "preview",
+    )
+
+    assert response.ok is True
+    bundle_dir = Path(response.artifacts[0].path)
+    bundle_text = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in [
+            bundle_dir / "manifest.json",
+            bundle_dir / "summary.json",
+            bundle_dir / "artifacts" / "build.json",
+        ]
+    )
+    assert "SITETOKEN" not in bundle_text
+    assert "SITEBEARER" not in bundle_text
+    assert "SITEPASSWORD" not in bundle_text
+    assert "[REDACTED]" in bundle_text
+
+
+def test_distill_bundle_redacts_sensitive_values_from_artifacts(tmp_path, monkeypatch):
+    vault = tmp_path / "vault"
+    write_minimal_distill_vault(vault)
+    input_path = tmp_path / "distill-health-input.json"
+    input_path.write_text(
+        json.dumps({"vault": str(vault), "api_key": "DISTILLINPUT"}),
+        encoding="utf-8",
+    )
+
+    def fake_run(*_args, **_kwargs):
+        return backends.subprocess.CompletedProcess(
+            args=["distill"],
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "runtime_stage": "ok",
+                    "token": "DISTILLTOKEN",
+                    "log": "secret=DISTILLSECRET",
+                }
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(backends.subprocess, "run", fake_run)
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "distill.health",
+            str(input_path),
+            "--preview-dir",
+            str(tmp_path / "preview"),
+            "--json",
+        ],
+    )
+
+    payload = parse_json(result)
+    bundle_dir = Path(payload["artifacts"][0]["path"])
+    bundle_text = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in [
+            bundle_dir / "manifest.json",
+            bundle_dir / "summary.json",
+            bundle_dir / "artifacts" / "health.json",
+        ]
+    )
+    assert "DISTILLINPUT" not in bundle_text
+    assert "DISTILLTOKEN" not in bundle_text
+    assert "DISTILLSECRET" not in bundle_text
+    assert "[REDACTED]" in bundle_text
+
+
+def test_xhs_select_pending_creates_preview_bundle(tmp_path):
+    pending_dir = tmp_path / "pending"
+    pending_dir.mkdir()
+    old_pending = pending_dir / "20260518_old.json"
+    write_xhs_pending(old_pending, with_images=True)
+    target_pending = pending_dir / "20260519_new.json"
+    write_xhs_pending(target_pending, with_images=False)
+    input_path = tmp_path / "select-input.json"
+    input_path.write_text(json.dumps({"pending_dir": str(pending_dir)}), encoding="utf-8")
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "xhs.select-pending",
+            str(input_path),
+            "--preview-dir",
+            str(tmp_path / "preview"),
+            "--json",
+        ],
+    )
+
+    payload = parse_json(result)
+    assert payload["ok"] is True
+    assert payload["data"]["capability"] == "xhs.select-pending"
+    assert payload["data"]["pending_file"] == str(target_pending)
+    bundle_dir = Path(payload["artifacts"][0]["path"])
+    assert (bundle_dir / "manifest.json").exists()
+    assert (bundle_dir / "summary.json").exists()
+    assert (bundle_dir / "artifacts" / "select-pending.json").exists()
+    inspect_payload = json.loads(runner.invoke(app, ["inspect", str(bundle_dir), "--json"]).output)
+    assert inspect_payload["data"]["capability"] == "xhs.select-pending"
+    assert inspect_payload["data"]["artifact_count"] == 1
 
 
 def test_distill_health_creates_preview_bundle_for_vault(tmp_path):
@@ -195,9 +549,7 @@ def test_distill_health_creates_preview_bundle_for_vault(tmp_path):
     assert manifest["capability"] == "distill.health"
     assert summary["headline"].startswith("distill.health:")
     assert health["runtime_stage"] == payload["data"]["runtime_stage"]
-    inspect_payload = json.loads(
-        runner.invoke(app, ["inspect", str(bundle_dir), "--json"]).output
-    )
+    inspect_payload = json.loads(runner.invoke(app, ["inspect", str(bundle_dir), "--json"]).output)
     assert inspect_payload["data"]["capability"] == "distill.health"
     assert inspect_payload["data"]["artifact_count"] == 1
 
@@ -259,13 +611,18 @@ def test_distill_command_capabilities_create_preview_bundles(tmp_path):
 
 
 def test_inspect_preview_bundle_returns_manifest_and_summary(tmp_path):
-    input_path = Path("examples/github-trending.json")
+    pending_dir = tmp_path / "pending"
+    pending_dir.mkdir()
+    target_pending = pending_dir / "20260519_new.json"
+    write_xhs_pending(target_pending, with_images=False)
+    input_path = tmp_path / "select-input.json"
+    input_path.write_text(json.dumps({"pending_dir": str(pending_dir)}), encoding="utf-8")
     preview_dir = tmp_path / "preview"
     run_result = runner.invoke(
         app,
         [
             "run",
-            "xhs.generate-cards",
+            "xhs.select-pending",
             str(input_path),
             "--preview-dir",
             str(preview_dir),
@@ -280,15 +637,11 @@ def test_inspect_preview_bundle_returns_manifest_and_summary(tmp_path):
     payload = parse_json(inspect_result)
     assert payload["ok"] is True
     assert payload["data"]["protocol_version"] == "preview-bundle/v1"
-    assert payload["data"]["capability"] == "xhs.generate-cards"
-    assert payload["data"]["headline"] == "Generated 3 preview cards"
-    assert payload["data"]["artifact_count"] == 3
+    assert payload["data"]["capability"] == "xhs.select-pending"
+    assert payload["data"]["headline"].startswith("xhs.select-pending: selected")
+    assert payload["data"]["artifact_count"] == 1
     assert payload["next_actions"] == [
-        (
-            "Wire this capability to baoyu-image-cards or gpt-image-2 when production "
-            "image generation is needed."
-        ),
-        "Keep preview-bundle/v1 manifest + summary contract stable.",
+        "Run xhs.generate-cards for the selected pending_file before previewing."
     ]
 
 
@@ -303,9 +656,7 @@ def test_inspect_preview_bundle_rejects_missing_artifact_file(tmp_path):
                 "capability": "fake.generate",
                 "status": "ok",
                 "summary_path": "summary.json",
-                "artifacts": [
-                    {"id": "missing", "kind": "text", "path": "artifacts/missing.txt"}
-                ],
+                "artifacts": [{"id": "missing", "kind": "text", "path": "artifacts/missing.txt"}],
             }
         ),
         encoding="utf-8",
@@ -388,9 +739,7 @@ print(json.dumps({"bundle_dir": str(bundle)}))
     assert payload["data"] == {"bundle_dir": str(bundle_dir), "backend_kind": "subprocess"}
     assert (bundle_dir / "manifest.json").exists()
     assert (bundle_dir / "summary.json").exists()
-    inspect_payload = json.loads(
-        runner.invoke(app, ["inspect", str(bundle_dir), "--json"]).output
-    )
+    inspect_payload = json.loads(runner.invoke(app, ["inspect", str(bundle_dir), "--json"]).output)
     assert inspect_payload["data"]["capability"] == "fake.generate"
     assert inspect_payload["data"]["artifact_count"] == 1
 
@@ -427,6 +776,61 @@ def test_subprocess_backend_requires_preview_bundle_artifact(tmp_path):
     assert payload["error"]["fix"] == "Backend must print JSON with bundle_dir"
 
 
+def test_subprocess_backend_failure_redacts_sensitive_output(tmp_path):
+    script_path = tmp_path / "leaky_backend.py"
+    script_path.write_text(
+        """
+import sys
+print('token=BACKENDSTDOUT')
+print('authorization: Bearer BACKENDSTDERR', file=sys.stderr)
+sys.exit(1)
+""".strip(),
+        encoding="utf-8",
+    )
+    input_path = tmp_path / "input.json"
+    input_path.write_text("{}", encoding="utf-8")
+    backend = {
+        "kind": "subprocess",
+        "target": f"python3 {script_path} {{input}} {{preview_dir}}",
+        "timeout_seconds": 10,
+    }
+
+    result = runner.invoke(
+        app,
+        [
+            "run-backend",
+            "fake.generate",
+            str(input_path),
+            "--preview-dir",
+            str(tmp_path / "preview"),
+            "--backend-json",
+            json.dumps(backend),
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 1
+    payload = json.loads(result.output)
+    assert payload["ok"] is False
+    message = payload["error"]["message"]
+    assert "BACKENDSTDOUT" not in message
+    assert "BACKENDSTDERR" not in message
+    assert "[REDACTED]" in message
+
+
+def test_registry_and_backend_xhs_capabilities_share_same_specs():
+    result = runner.invoke(app, ["registry", "list", "--json"])
+
+    payload = parse_json(result)
+    xhs_tool = next(tool for tool in payload["data"]["tools"] if tool["name"] == "xhs-image-cards")
+    registry_by_id = {capability["id"]: capability for capability in xhs_tool["capabilities"]}
+
+    assert set(registry_by_id) == set(XHS_CAPABILITY_SPECS)
+    for capability_id, spec in XHS_CAPABILITY_SPECS.items():
+        assert registry_by_id[capability_id]["side_effect"] == spec.side_effect
+        assert registry_by_id[capability_id]["backend"]["target"] == "run_xhs_command"
+
+
 def test_registry_and_backend_distill_capabilities_share_same_specs():
     result = runner.invoke(app, ["registry", "list", "--json"])
 
@@ -434,9 +838,7 @@ def test_registry_and_backend_distill_capabilities_share_same_specs():
     distill_tool = next(
         tool for tool in payload["data"]["tools"] if tool["name"] == "distill-vault"
     )
-    registry_by_id = {
-        capability["id"]: capability for capability in distill_tool["capabilities"]
-    }
+    registry_by_id = {capability["id"]: capability for capability in distill_tool["capabilities"]}
 
     assert set(registry_by_id) == set(DISTILL_CAPABILITY_SPECS)
     for capability_id, spec in DISTILL_CAPABILITY_SPECS.items():

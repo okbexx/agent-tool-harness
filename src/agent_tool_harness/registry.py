@@ -3,8 +3,10 @@ from __future__ import annotations
 from .capabilities import (
     DISTILL_CAPABILITY_SPECS,
     SITE_CAPABILITY_SPECS,
+    XHS_CAPABILITY_SPECS,
     DistillCapabilitySpec,
     SiteCapabilitySpec,
+    XhsCapabilitySpec,
 )
 from .models import BackendSpec, Capability, HarnessTool
 
@@ -71,10 +73,50 @@ def _site_capability(spec: SiteCapabilitySpec) -> Capability:
     )
 
 
-DISTILL_CAPABILITIES = [
-    _distill_capability(spec) for spec in DISTILL_CAPABILITY_SPECS.values()
-]
+def _xhs_input_schema(required: tuple[str, ...]) -> dict:
+    return {
+        "type": "object",
+        "required": list(required),
+        "properties": {
+            "pending_file": {"type": "string", "description": "Path to an XHS pending JSON file."},
+            "pending_dir": {
+                "type": "string",
+                "description": "Path to an XHS pending queue directory.",
+            },
+            "target": {
+                "type": "string",
+                "description": "Pending JSON or artifact directory for QA.",
+            },
+            "title": {
+                "type": "string",
+                "description": "Title substring for matching a pending item.",
+            },
+            "headed": {"type": "boolean", "description": "For publish: open a headed browser."},
+            "dry_run": {
+                "type": "boolean",
+                "description": "For publish: call the publisher in dry-run mode.",
+            },
+            "timeout_seconds": {"type": "integer"},
+        },
+    }
+
+
+def _xhs_capability(spec: XhsCapabilitySpec) -> Capability:
+    return Capability(
+        id=spec.id,
+        name=spec.name,
+        summary=spec.summary,
+        input_schema=_xhs_input_schema(spec.required),
+        side_effect=spec.side_effect,
+        preview_protocol="preview-bundle/v1",
+        backend=BackendSpec(kind="python_function", target="run_xhs_command"),
+        examples=[f"agent-tool-harness run {spec.id} xhs-input.json --preview-dir .preview --json"],
+    )
+
+
+DISTILL_CAPABILITIES = [_distill_capability(spec) for spec in DISTILL_CAPABILITY_SPECS.values()]
 SITE_CAPABILITIES = [_site_capability(spec) for spec in SITE_CAPABILITY_SPECS.values()]
+XHS_CAPABILITIES = [_xhs_capability(spec) for spec in XHS_CAPABILITY_SPECS.values()]
 
 DEFAULT_TOOLS = [
     HarnessTool(
@@ -82,52 +124,21 @@ DEFAULT_TOOLS = [
         display_name="XHS Image Cards Harness",
         category="content",
         description=(
-            "Generate Xiaohongshu image card preview bundles from trend summary "
-            "and repo list."
+            "Operate the local Xiaohongshu pending, card generation, QA, preview, "
+            "and publish pipeline through inspectable bundles."
         ),
-        capabilities=[
-            Capability(
-                id="xhs.generate-cards",
-                name="generate_cards",
-                summary="Generate a preview bundle with XHS-ready card artifacts.",
-                input_schema={
-                    "type": "object",
-                    "required": ["trend_summary", "repos"],
-                    "properties": {
-                        "trend_summary": {"type": "string"},
-                        "repos": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "required": ["name"],
-                                "properties": {
-                                    "name": {"type": "string"},
-                                    "stars": {"type": "integer"},
-                                    "why": {"type": "string"},
-                                },
-                            },
-                        },
-                    },
-                },
-                side_effect="local_files",
-                preview_protocol="preview-bundle/v1",
-                backend=BackendSpec(kind="python_function", target="run_xhs_generate_cards"),
-                examples=[
-                    "agent-tool-harness run xhs.generate-cards "
-                    "examples/github-trending.json --preview-dir .preview --json"
-                ],
-            )
-        ],
+        capabilities=XHS_CAPABILITIES,
         healthcheck="agent-tool-harness doctor xhs-image-cards --json",
-        side_effects={"doctor": "none", "xhs.generate-cards": "local_files"},
+        side_effects={
+            "doctor": "none",
+            **{capability.id: capability.side_effect for capability in XHS_CAPABILITIES},
+        },
     ),
     HarnessTool(
         name="distill-vault",
         display_name="Distill Vault Harness",
         category="knowledge-runtime",
-        description=(
-            "Expose distill-vault CLI surfaces as inspectable agent capabilities."
-        ),
+        description=("Expose distill-vault CLI surfaces as inspectable agent capabilities."),
         capabilities=DISTILL_CAPABILITIES,
         healthcheck="agent-tool-harness doctor distill-vault --json",
         side_effects={
@@ -139,9 +150,7 @@ DEFAULT_TOOLS = [
         name="personal-site",
         display_name="Personal Site Harness",
         category="site-ops",
-        description=(
-            "Operate Jarl's personal Astro site through inspectable preview bundles."
-        ),
+        description=("Operate Jarl's personal Astro site through inspectable preview bundles."),
         capabilities=SITE_CAPABILITIES,
         healthcheck="agent-tool-harness doctor personal-site --json",
         side_effects={

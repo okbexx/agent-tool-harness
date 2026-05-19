@@ -22,14 +22,57 @@ Failures return:
 
 - `registry list --json`: discover registered tools and capabilities
 - `doctor --all --json`: run no-side-effect health checks
-- `run xhs.generate-cards <input.json> --preview-dir <dir> --json`: generate a preview bundle
+- `run xhs.<surface> <input.json> --preview-dir <dir> --json`: operate the local Xiaohongshu pending/cards/QA/preview pipeline and bundle outputs
 - `run distill.<surface> <input.json> --preview-dir <dir> --json`: run distill-vault CLI surfaces and bundle their outputs
 - `run site.<surface> <input.json> --preview-dir <dir> --json`: operate the personal Astro site and bundle status/build/link/deploy reports
 - `inspect <preview-bundle-dir> --json`: summarize a generated preview bundle for review
 - `run-backend <capability> <input.json> --backend-json <BackendSpec> --json`: run an explicit backend adapter
 - `skill export <capability-or-tool> --json`: generate an agent-readable `SKILL.md`
 
-The current XHS backend intentionally emits Markdown preview artifacts. The production image backend can replace it later while keeping the JSON and `preview-bundle/v1` contract stable. Distill capabilities are the first real self-use backend family: they shell out to the local `distill` CLI and bundle outputs for inspection.
+The current XHS backend wraps Jarl's local `~/.hermes/scripts/xhs-pipeline` scripts: select pending items, generate local cards, run image QA, finalize the Telegram preview, and gate publishing. `xhs.publish` is marked `external_write` and is blocked unless `--allow-external-write` is supplied. Distill capabilities are a real self-use backend family: they shell out to the local `distill` CLI and bundle outputs for inspection.
+
+### XHS capabilities
+
+Read/preview-oriented capabilities:
+
+```text
+xhs.select-pending
+xhs.generate-cards
+xhs.image-qa
+xhs.preview-gate
+xhs.finalize-preview
+```
+
+Write-capable capabilities:
+
+```text
+xhs.publish
+```
+
+Typical self-use flow:
+
+```bash
+cat > /tmp/xhs-select-input.json <<'JSON'
+{"pending_dir":"/home/jarl/.hermes/scripts/xhs-pipeline/pending"}
+JSON
+ath run xhs.select-pending /tmp/xhs-select-input.json --preview-dir .preview --json
+ath inspect <bundle-dir> --json
+
+cat > /tmp/xhs-generate-input.json <<'JSON'
+{"pending_file":"/home/jarl/.hermes/scripts/xhs-pipeline/pending/<file>.json"}
+JSON
+ath run xhs.generate-cards /tmp/xhs-generate-input.json --preview-dir .preview --json
+ath run xhs.image-qa /tmp/xhs-generate-input.json --preview-dir .preview --json
+ath run xhs.finalize-preview /tmp/xhs-generate-input.json --preview-dir .preview --json
+```
+
+Only after explicit approval:
+
+```bash
+ath run xhs.publish /tmp/xhs-generate-input.json --preview-dir .preview --allow-external-write --json
+```
+
+Every XHS run writes an `xhs-image-cards` preview bundle with a command-specific JSON artifact such as `select-pending.json`, `generate-cards.json`, or `finalize-preview.json`. See `docs/xhs-harness-runbook.md` for the self-use runbook.
 
 ### Distill capabilities
 
@@ -129,7 +172,8 @@ python3 -m pip install -e '.[dev]'
 ```bash
 agent-tool-harness registry list --json
 agent-tool-harness doctor --all --json
-agent-tool-harness run xhs.generate-cards examples/github-trending.json --preview-dir /tmp/ath-preview --json
+printf '{"pending_dir":"/home/jarl/.hermes/scripts/xhs-pipeline/pending"}' > /tmp/xhs-select-input.json
+agent-tool-harness run xhs.select-pending /tmp/xhs-select-input.json --preview-dir /tmp/ath-preview --json
 printf '{"vault":"/home/jarl/all_in_one"}' > /tmp/distill-health-input.json
 agent-tool-harness run distill.health /tmp/distill-health-input.json --preview-dir /tmp/ath-preview --json
 printf '{"site":"/home/jarl/personal-site"}' > /tmp/site-input.json
@@ -155,9 +199,7 @@ A file-producing run emits a bundle like:
 ├── manifest.json
 ├── summary.json
 └── artifacts/
-    ├── card-01.md
-    ├── card-02.md
-    └── card-03.md
+    └── generate-cards.json
 ```
 
 `manifest.json` is for machines. `summary.json` is for agents and humans deciding the next action.

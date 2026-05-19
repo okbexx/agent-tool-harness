@@ -306,7 +306,7 @@ def test_site_deploy_pushes_dist_to_gh_pages_with_allow_flag(tmp_path, monkeypat
     payload = parse_json(result)
     assert payload["ok"] is True
     assert payload["data"]["capability"] == "site.deploy"
-    assert payload["data"]["remote"] == "https://okbexx:***@github.com/okbexx/okbexx.github.io.git"
+    assert payload["data"]["remote"] == "https://okbexx:[REDACTED]@github.com/okbexx/okbexx.github.io.git"
     commands = [call["command"] for call in calls]
     assert commands == [
         ["git", "remote", "get-url", "origin"],
@@ -323,5 +323,5 @@ def test_site_deploy_pushes_dist_to_gh_pages_with_allow_flag(tmp_path, monkeypat
     ]
     bundle_dir = Path(payload["artifacts"][0]["path"])
     report = json.loads((bundle_dir / "artifacts" / "deploy.json").read_text(encoding="utf-8"))
-    assert report["remote"] == "https://okbexx:***@github.com/okbexx/okbexx.github.io.git"
+    assert report["remote"] == "https://okbexx:[REDACTED]@github.com/okbexx/okbexx.github.io.git"
     assert "secret-token" not in json.dumps(report)

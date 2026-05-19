@@ -74,6 +74,46 @@ Reads `manifest.json` and `summary.json` from a generated preview bundle and ret
 
 Generates a `SKILL.md` from capability metadata or a tool-level runbook such as `distill-vault`.
 
+### XHS capability family
+
+The harness exposes Jarl's local Xiaohongshu publishing pipeline as agent-callable capabilities. Local/preview capabilities write `preview-bundle/v1` under `.preview/xhs-image-cards/`; publishing is `external_write` and blocked by default.
+
+Read/preview-oriented capabilities:
+
+```text
+xhs.select-pending
+xhs.generate-cards
+xhs.image-qa
+xhs.preview-gate
+xhs.finalize-preview
+```
+
+Write-capable capabilities:
+
+```text
+xhs.publish
+```
+
+Input examples:
+
+```json
+{ "pending_dir": "/home/jarl/.hermes/scripts/xhs-pipeline/pending" }
+```
+
+```json
+{ "pending_file": "/home/jarl/.hermes/scripts/xhs-pipeline/pending/<file>.json" }
+```
+
+The required safety flow is:
+
+1. `xhs.select-pending` to choose the newest pending item without images.
+2. `xhs.generate-cards` to create/update local card images.
+3. `xhs.image-qa` to bundle rule checks.
+4. `xhs.finalize-preview` to produce a Telegram-ready preview payload only if QA allows it.
+5. `xhs.publish` only after explicit approval with `--allow-external-write`.
+
+Command-specific artifacts include `select-pending.json`, `generate-cards.json`, `image-qa.json`, `preview-gate.json`, `finalize-preview.json`, and `publish.json`.
+
 ### Distill capability family
 
 The harness exposes the local `distill` CLI as agent-callable capabilities. Every capability takes a JSON object with `vault`; route/plan/capture/apply also take `intent`; search takes `query`.
@@ -172,7 +212,7 @@ Each capability may declare an explicit backend record so agents can distinguish
 {
   "backend": {
     "kind": "python_function",
-    "target": "run_xhs_generate_cards",
+    "target": "run_xhs_command",
     "timeout_seconds": 300
   }
 }

@@ -6,8 +6,6 @@ from .models import Capability, HarnessTool
 def minimum_input_text(capability: Capability) -> str:
     required = capability.input_schema.get("required") or []
     labels = [f"`{name}`" for name in required]
-    if capability.id == "xhs.generate-cards":
-        labels = ["`trend_summary`", "`repos[]`"]
     if not labels:
         return "the fields required by the input schema"
     if len(labels) == 1:
@@ -81,6 +79,41 @@ agent-tool-harness doctor --all --json
 
 
 def tool_examples(tool: HarnessTool) -> str:
+    if tool.name == "xhs-image-cards":
+        return """## XHS examples
+Select the latest pending item that still needs images:
+
+```bash
+cat > /tmp/xhs-select-input.json <<'JSON'
+{"pending_dir":"/home/jarl/.hermes/scripts/xhs-pipeline/pending"}
+JSON
+ath run xhs.select-pending /tmp/xhs-select-input.json --preview-dir .preview --json
+ath inspect <bundle-dir> --json
+```
+
+Generate local image cards and inspect the bundle:
+
+```bash
+cat > /tmp/xhs-generate-input.json <<'JSON'
+{"pending_file":"/home/jarl/.hermes/scripts/xhs-pipeline/pending/<file>.json"}
+JSON
+ath run xhs.generate-cards /tmp/xhs-generate-input.json --preview-dir .preview --json
+ath inspect <bundle-dir> --json
+```
+
+Run QA and final preview gate before any publishing:
+
+```bash
+ath run xhs.image-qa /tmp/xhs-generate-input.json --preview-dir .preview --json
+ath run xhs.finalize-preview /tmp/xhs-generate-input.json --preview-dir .preview --json
+```
+
+Publishing is external_write and requires explicit user approval:
+
+```bash
+ath run xhs.publish /tmp/xhs-generate-input.json \
+  --preview-dir .preview --allow-external-write --json
+```"""
     if tool.name == "distill-vault":
         return """## Distill examples
 Route a knowledge task before reading or writing:

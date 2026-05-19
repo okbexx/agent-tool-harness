@@ -28,6 +28,16 @@ class SiteCapabilitySpec:
     side_effect: SideEffect = "local_files"
 
 
+@dataclass(frozen=True)
+class XhsCapabilitySpec:
+    id: str
+    name: str
+    summary: str
+    artifact: str
+    side_effect: SideEffect = "local_files"
+    required: tuple[str, ...] = field(default_factory=tuple)
+
+
 DISTILL_CAPABILITY_SPECS: dict[str, DistillCapabilitySpec] = {
     "distill.status": DistillCapabilitySpec(
         id="distill.status",
@@ -169,6 +179,51 @@ SITE_CAPABILITY_SPECS: dict[str, SiteCapabilitySpec] = {
         name="deploy",
         summary="Deploy the built personal site to GitHub Pages.",
         artifact="deploy.json",
+        side_effect="external_write",
+    ),
+}
+
+
+XHS_CAPABILITY_SPECS: dict[str, XhsCapabilitySpec] = {
+    "xhs.generate-cards": XhsCapabilitySpec(
+        id="xhs.generate-cards",
+        name="generate_cards",
+        summary="Generate XHS image cards for a pending JSON file and bundle the outputs.",
+        artifact="generate-cards.json",
+        required=("pending_file",),
+    ),
+    "xhs.select-pending": XhsCapabilitySpec(
+        id="xhs.select-pending",
+        name="select_pending",
+        summary="Select the latest XHS pending JSON that still needs image generation.",
+        artifact="select-pending.json",
+    ),
+    "xhs.image-qa": XhsCapabilitySpec(
+        id="xhs.image-qa",
+        name="image_qa",
+        summary="Run the XHS image QA checker against a pending JSON or artifact directory.",
+        artifact="image-qa.json",
+        required=("target",),
+    ),
+    "xhs.preview-gate": XhsCapabilitySpec(
+        id="xhs.preview-gate",
+        name="preview_gate",
+        summary="Decide whether an XHS pending item is safe to preview.",
+        artifact="preview-gate.json",
+        required=("pending_file",),
+    ),
+    "xhs.finalize-preview": XhsCapabilitySpec(
+        id="xhs.finalize-preview",
+        name="finalize_preview",
+        summary="Create the final Telegram preview payload for an XHS pending item.",
+        artifact="finalize-preview.json",
+        required=("pending_file",),
+    ),
+    "xhs.publish": XhsCapabilitySpec(
+        id="xhs.publish",
+        name="publish",
+        summary="Publish an approved XHS pending item through social-auto-upload.",
+        artifact="publish.json",
         side_effect="external_write",
     ),
 }
