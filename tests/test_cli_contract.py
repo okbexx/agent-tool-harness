@@ -7,6 +7,25 @@ from typer.testing import CliRunner
 
 from agent_tool_harness.cli import app
 
+
+def write_minimal_distill_vault(path: Path) -> None:
+    (path / "知识" / "项目").mkdir(parents=True)
+    (path / "输出").mkdir()
+    (path / "运维").mkdir()
+    (path / "系统").mkdir()
+    (path / "distill.yaml").write_text(
+        "knowledge_dirs: ['知识']\n"
+        "output_dirs: ['输出']\n"
+        "ops_dirs: ['运维']\n"
+        "system_dirs: ['系统']\n",
+        encoding="utf-8",
+    )
+    (path / "知识" / "项目" / "示例项目.md").write_text(
+        "---\ntype: project\nstatus: active\n---\n# 示例项目\n",
+        encoding="utf-8",
+    )
+
+
 runner = CliRunner()
 
 
@@ -25,7 +44,34 @@ def test_registry_list_exposes_capability_metadata():
     assert tools[0]["name"] == "xhs-image-cards"
     assert tools[0]["capabilities"][0]["id"] == "xhs.generate-cards"
     assert tools[0]["capabilities"][0]["side_effect"] == "local_files"
+    assert tools[0]["capabilities"][0]["backend"]["kind"] == "python_function"
+    assert tools[0]["capabilities"][0]["backend"]["target"] == "run_xhs_generate_cards"
     assert tools[0]["healthcheck"] == "agent-tool-harness doctor xhs-image-cards --json"
+    distill_tool = tools[1]
+    assert distill_tool["name"] == "distill-vault"
+    distill_capabilities = {
+        capability["id"]: capability for capability in distill_tool["capabilities"]
+    }
+    assert set(distill_capabilities) >= {
+        "distill.status",
+        "distill.health",
+        "distill.capabilities",
+        "distill.instance-doctor",
+        "distill.upgrade-plan",
+        "distill.lint-check",
+        "distill.lint-fix",
+        "distill.route",
+        "distill.plan",
+        "distill.search",
+        "distill.promote-dry-run",
+        "distill.promote-auto",
+        "distill.pipeline-run",
+        "distill.capture",
+        "distill.apply",
+    }
+    assert distill_capabilities["distill.health"]["side_effect"] == "local_files"
+    assert distill_capabilities["distill.lint-fix"]["side_effect"] == "external_write"
+    assert distill_capabilities["distill.health"]["backend"]["target"] == "run_distill_command"
 
 
 def test_doctor_all_reports_no_side_effect_checks():
@@ -77,6 +123,257 @@ def test_run_generate_cards_creates_preview_bundle(tmp_path):
         "card-03",
     ]
     assert summary["headline"] == "Generated 3 preview cards"
+
+
+def test_distill_health_creates_preview_bundle_for_vault(tmp_path):
+    vault = tmp_path / "vault"
+    write_minimal_distill_vault(vault)
+    input_path = tmp_path / "distill-health-input.json"
+    input_path.write_text(json.dumps({"vault": str(vault)}), encoding="utf-8")
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "distill.health",
+            str(input_path),
+            "--preview-dir",
+            str(tmp_path / "preview"),
+            "--json",
+        ],
+    )
+
+    payload = parse_json(result)
+    assert payload["ok"] is True
+    assert payload["data"]["runtime_stage"]
+    assert payload["data"]["total_objects"] >= 1
+    bundle_dir = Path(payload["artifacts"][0]["path"])
+    assert bundle_dir.exists()
+    manifest = json.loads((bundle_dir / "manifest.json").read_text(encoding="utf-8"))
+    summary = json.loads((bundle_dir / "summary.json").read_text(encoding="utf-8"))
+    health = json.loads((bundle_dir / "artifacts" / "health.json").read_text(encoding="utf-8"))
+    assert manifest["protocol_version"] == "preview-bundle/v1"
+    assert manifest["tool"] == "distill-vault"
+    assert manifest["capability"] == "distill.health"
+    assert summary["headline"].startswith("distill.health:")
+    assert health["runtime_stage"] == payload["data"]["runtime_stage"]
+    inspect_payload = json.loads(
+        runner.invoke(app, ["inspect", str(bundle_dir), "--json"]).output
+    )
+    assert inspect_payload["data"]["capability"] == "distill.health"
+    assert inspect_payload["data"]["artifact_count"] == 1
+
+
+def test_distill_command_capabilities_create_preview_bundles(tmp_path):
+    vault = tmp_path / "vault"
+    write_minimal_distill_vault(vault)
+    cases = [
+        ("distill.status", {"vault": str(vault)}, "status.json"),
+        ("distill.capabilities", {"vault": str(vault)}, "capabilities.json"),
+        ("distill.instance-doctor", {"vault": str(vault)}, "instance-doctor.json"),
+        ("distill.upgrade-plan", {"vault": str(vault)}, "upgrade-plan.json"),
+        ("distill.lint-check", {"vault": str(vault)}, "lint-check.json"),
+        (
+            "distill.route",
+            {"vault": str(vault), "intent": "记录 agent-tool-harness 接入 distill"},
+            "route.json",
+        ),
+        (
+            "distill.plan",
+            {"vault": str(vault), "intent": "记录 agent-tool-harness 接入 distill"},
+            "plan.json",
+        ),
+        (
+            "distill.search",
+            {"vault": str(vault), "query": "示例项目", "limit": 3},
+            "search.txt",
+        ),
+        ("distill.promote-dry-run", {"vault": str(vault)}, "promote-dry-run.txt"),
+    ]
+
+    for capability_id, input_data, artifact_file in cases:
+        input_path = tmp_path / f"{capability_id}.json"
+        input_path.write_text(json.dumps(input_data), encoding="utf-8")
+        result = runner.invoke(
+            app,
+            [
+                "run",
+                capability_id,
+                str(input_path),
+                "--preview-dir",
+                str(tmp_path / "preview"),
+                "--json",
+            ],
+        )
+
+        payload = parse_json(result)
+        assert payload["ok"] is True, capability_id
+        assert payload["data"]["capability"] == capability_id
+        bundle_dir = Path(payload["artifacts"][0]["path"])
+        assert (bundle_dir / "manifest.json").exists(), capability_id
+        assert (bundle_dir / "summary.json").exists(), capability_id
+        assert (bundle_dir / "artifacts" / artifact_file).exists(), capability_id
+        inspect_payload = json.loads(
+            runner.invoke(app, ["inspect", str(bundle_dir), "--json"]).output
+        )
+        assert inspect_payload["data"]["capability"] == capability_id
+        assert inspect_payload["data"]["artifact_count"] == 1
+
+
+def test_inspect_preview_bundle_returns_manifest_and_summary(tmp_path):
+    input_path = Path("examples/github-trending.json")
+    preview_dir = tmp_path / "preview"
+    run_result = runner.invoke(
+        app,
+        [
+            "run",
+            "xhs.generate-cards",
+            str(input_path),
+            "--preview-dir",
+            str(preview_dir),
+            "--json",
+        ],
+    )
+    run_payload = parse_json(run_result)
+    bundle_dir = run_payload["artifacts"][0]["path"]
+
+    inspect_result = runner.invoke(app, ["inspect", bundle_dir, "--json"])
+
+    payload = parse_json(inspect_result)
+    assert payload["ok"] is True
+    assert payload["data"]["protocol_version"] == "preview-bundle/v1"
+    assert payload["data"]["capability"] == "xhs.generate-cards"
+    assert payload["data"]["headline"] == "Generated 3 preview cards"
+    assert payload["data"]["artifact_count"] == 3
+    assert payload["next_actions"] == [
+        (
+            "Wire this capability to baoyu-image-cards or gpt-image-2 when production "
+            "image generation is needed."
+        ),
+        "Keep preview-bundle/v1 manifest + summary contract stable.",
+    ]
+
+
+def test_subprocess_backend_runs_declared_command_and_returns_bundle(tmp_path):
+    script_path = tmp_path / "fake_backend.py"
+    script_path.write_text(
+        """
+import json
+import sys
+from pathlib import Path
+
+input_path = Path(sys.argv[1])
+preview_root = Path(sys.argv[2])
+data = json.loads(input_path.read_text())
+bundle = preview_root / "fake-tool" / "bundle-001"
+artifacts = bundle / "artifacts"
+artifacts.mkdir(parents=True)
+(artifacts / "result.md").write_text("# " + data["title"] + "\\n")
+(bundle / "manifest.json").write_text(json.dumps({
+    "protocol_version": "preview-bundle/v1",
+    "tool": "fake-tool",
+    "capability": "fake.generate",
+    "status": "ok",
+    "source": {"input_path": str(input_path)},
+    "summary_path": "summary.json",
+    "artifacts": [{"id": "result", "kind": "markdown-preview", "path": "artifacts/result.md"}],
+}))
+(bundle / "summary.json").write_text(json.dumps({
+    "headline": "Fake backend generated preview",
+    "facts": {"title": data["title"]},
+    "warnings": [],
+    "next_actions": ["Inspect generated fake bundle"],
+}))
+print(json.dumps({"bundle_dir": str(bundle)}))
+""".strip(),
+        encoding="utf-8",
+    )
+    input_path = tmp_path / "input.json"
+    input_path.write_text(json.dumps({"title": "Hello subprocess"}), encoding="utf-8")
+    backend = {
+        "kind": "subprocess",
+        "target": f"python3 {script_path} {{input}} {{preview_dir}}",
+        "timeout_seconds": 10,
+    }
+
+    result = runner.invoke(
+        app,
+        [
+            "run-backend",
+            "fake.generate",
+            str(input_path),
+            "--preview-dir",
+            str(tmp_path / "preview"),
+            "--backend-json",
+            json.dumps(backend),
+            "--json",
+        ],
+    )
+
+    payload = parse_json(result)
+    assert payload["ok"] is True
+    bundle_dir = Path(payload["artifacts"][0]["path"])
+    assert payload["data"] == {"bundle_dir": str(bundle_dir), "backend_kind": "subprocess"}
+    assert (bundle_dir / "manifest.json").exists()
+    assert (bundle_dir / "summary.json").exists()
+    inspect_payload = json.loads(
+        runner.invoke(app, ["inspect", str(bundle_dir), "--json"]).output
+    )
+    assert inspect_payload["data"]["capability"] == "fake.generate"
+    assert inspect_payload["data"]["artifact_count"] == 1
+
+
+def test_subprocess_backend_requires_preview_bundle_artifact(tmp_path):
+    script_path = tmp_path / "bad_backend.py"
+    script_path.write_text('print("{}")', encoding="utf-8")
+    input_path = tmp_path / "input.json"
+    input_path.write_text("{}", encoding="utf-8")
+    backend = {
+        "kind": "subprocess",
+        "target": f"python3 {script_path} {{input}} {{preview_dir}}",
+        "timeout_seconds": 10,
+    }
+
+    result = runner.invoke(
+        app,
+        [
+            "run-backend",
+            "fake.generate",
+            str(input_path),
+            "--preview-dir",
+            str(tmp_path / "preview"),
+            "--backend-json",
+            json.dumps(backend),
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 1
+    payload = json.loads(result.output)
+    assert payload["ok"] is False
+    assert payload["error"]["type"] == "invalid_backend_output"
+    assert payload["error"]["fix"] == "Backend must print JSON with bundle_dir"
+
+
+def test_run_unknown_capability_returns_structured_error():
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "missing.capability",
+            "examples/github-trending.json",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 1
+    payload = json.loads(result.output)
+    assert payload["ok"] is False
+    assert payload["error"] == {
+        "type": "unknown_capability",
+        "message": "Unsupported capability: missing.capability",
+        "fix": "Run registry list --json",
+    }
 
 
 def test_skill_export_is_generated_from_metadata():

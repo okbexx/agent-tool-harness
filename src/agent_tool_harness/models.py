@@ -5,6 +5,12 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 
+class BackendSpec(BaseModel):
+    kind: Literal["python_function", "subprocess"]
+    target: str
+    timeout_seconds: int = 300
+
+
 class Capability(BaseModel):
     id: str
     name: str
@@ -13,6 +19,7 @@ class Capability(BaseModel):
     side_effect: Literal["none", "local_files", "network", "external_write"] = "none"
     preview_protocol: str | None = None
     examples: list[str] = Field(default_factory=list)
+    backend: BackendSpec | None = None
 
 
 class HarnessTool(BaseModel):

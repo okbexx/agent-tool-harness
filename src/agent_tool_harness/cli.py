@@ -7,8 +7,13 @@ from typing import Annotated
 import typer
 from rich.console import Console
 
-from .backends import run_capability, tool_for_capability
-from .models import HarnessResponse
+from .backends import (
+    inspect_preview_bundle,
+    run_capability,
+    run_subprocess_backend,
+    tool_for_capability,
+)
+from .models import BackendSpec, HarnessResponse
 from .registry import DEFAULT_TOOLS
 from .skill_export import render_skill
 
@@ -100,6 +105,59 @@ def run(
 ) -> None:
     """Run a capability and emit a stable JSON envelope."""
     response = run_capability(capability_id, input_path=input_path, preview_dir=preview_dir)
+    emit(response, as_json=as_json)
+    if not response.ok:
+        raise typer.Exit(1)
+
+
+@app.command("run-backend")
+def run_backend(
+    capability_id: Annotated[str, typer.Argument(help="Capability id, e.g. xhs.generate-cards.")],
+    input_path: Annotated[Path, typer.Argument(help="JSON input file.")],
+    preview_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--preview-dir",
+            help="Directory where preview bundles are written.",
+        ),
+    ] = None,
+    backend_json: Annotated[
+        str,
+        typer.Option("--backend-json", help="BackendSpec JSON object."),
+    ] = "",
+    as_json: Annotated[bool, typer.Option("--json", help="Emit JSON envelope.")] = False,
+) -> None:
+    """Run a capability through an explicit backend spec."""
+    try:
+        backend = BackendSpec.model_validate_json(backend_json)
+    except ValueError as exc:
+        emit(
+            HarnessResponse.failure(
+                "invalid_backend_spec",
+                str(exc),
+                "Pass --backend-json with kind, target, and optional timeout_seconds",
+            ),
+            as_json=True,
+        )
+        raise typer.Exit(2) from None
+    response = run_subprocess_backend(
+        capability_id=capability_id,
+        input_path=input_path,
+        preview_dir=preview_dir,
+        backend=backend,
+    )
+    emit(response, as_json=as_json)
+    if not response.ok:
+        raise typer.Exit(1)
+
+
+@app.command("inspect")
+def inspect(
+    bundle_dir: Annotated[Path, typer.Argument(help="Preview bundle directory.")],
+    as_json: Annotated[bool, typer.Option("--json", help="Emit JSON envelope.")] = False,
+) -> None:
+    """Inspect a preview bundle and summarize its machine-readable metadata."""
+    response = inspect_preview_bundle(bundle_dir=bundle_dir)
     emit(response, as_json=as_json)
     if not response.ok:
         raise typer.Exit(1)

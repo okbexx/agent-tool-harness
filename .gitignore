@@ -1,13 +1,24 @@
+# Python caches
 __pycache__/
 *.py[cod]
+*$py.class
+
+# Test/lint caches
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
 .coverage
 htmlcov/
-*.egg-info/
-dist/
+
+# Build outputs
 build/
-.venv/
-.env
+dist/
+*.egg-info/
+
+# Local preview/runtime artifacts
 .preview/
+.ath/
+
+# Virtual environments
+.venv/
+venv/
