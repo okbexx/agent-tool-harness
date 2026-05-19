@@ -19,6 +19,15 @@ class DistillCapabilitySpec:
     required_extra: tuple[str, ...] = field(default_factory=tuple)
 
 
+@dataclass(frozen=True)
+class SiteCapabilitySpec:
+    id: str
+    name: str
+    summary: str
+    artifact: str
+    side_effect: SideEffect = "local_files"
+
+
 DISTILL_CAPABILITY_SPECS: dict[str, DistillCapabilitySpec] = {
     "distill.status": DistillCapabilitySpec(
         id="distill.status",
@@ -131,5 +140,35 @@ DISTILL_CAPABILITY_SPECS: dict[str, DistillCapabilitySpec] = {
         artifact="search.txt",
         output="text",
         required_extra=("query",),
+    ),
+}
+
+
+SITE_CAPABILITY_SPECS: dict[str, SiteCapabilitySpec] = {
+    "site.status": SiteCapabilitySpec(
+        id="site.status",
+        name="status",
+        summary="Inspect the personal Astro site repository and bundle status metadata.",
+        artifact="status.json",
+    ),
+    "site.build": SiteCapabilitySpec(
+        id="site.build",
+        name="build",
+        summary="Run the personal site build and bundle the build report.",
+        artifact="build.json",
+        side_effect="external_write",
+    ),
+    "site.check-links": SiteCapabilitySpec(
+        id="site.check-links",
+        name="check_links",
+        summary="Check generated personal site links and bundle the link report.",
+        artifact="check-links.json",
+    ),
+    "site.deploy": SiteCapabilitySpec(
+        id="site.deploy",
+        name="deploy",
+        summary="Deploy the built personal site to GitHub Pages.",
+        artifact="deploy.json",
+        side_effect="external_write",
     ),
 }

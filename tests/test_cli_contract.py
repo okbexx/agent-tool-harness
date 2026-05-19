@@ -625,3 +625,27 @@ def test_tool_skill_export_guides_distill_harness_usage():
     assert "ath inspect" in skill
     assert "--allow-external-write" in skill
     assert "Do not run external_write capabilities without explicit user approval" in skill
+
+
+def test_tool_skill_export_guides_personal_site_harness_usage():
+    result = runner.invoke(app, ["skill", "export", "personal-site", "--json"])
+
+    payload = parse_json(result)
+    skill = payload["data"]["skill_md"]
+    assert "name: personal-site-harness" in skill
+    assert "ath doctor personal-site --json" in skill
+    assert "ath run site.status" in skill
+    assert "ath run site.check-links" in skill
+    assert "ath run site.build" in skill
+    assert "--allow-external-write" in skill
+    assert "distill.route" not in skill
+
+
+def test_capability_skill_export_guides_site_input_shape():
+    result = runner.invoke(app, ["skill", "export", "site.status", "--json"])
+
+    payload = parse_json(result)
+    skill = payload["data"]["skill_md"]
+    assert "capability: site.status" in skill
+    assert "minimum useful shape contains `site`" in skill
+    assert "trend_summary" not in skill

@@ -24,6 +24,7 @@ Failures return:
 - `doctor --all --json`: run no-side-effect health checks
 - `run xhs.generate-cards <input.json> --preview-dir <dir> --json`: generate a preview bundle
 - `run distill.<surface> <input.json> --preview-dir <dir> --json`: run distill-vault CLI surfaces and bundle their outputs
+- `run site.<surface> <input.json> --preview-dir <dir> --json`: operate the personal Astro site and bundle status/build/link/deploy reports
 - `inspect <preview-bundle-dir> --json`: summarize a generated preview bundle for review
 - `run-backend <capability> <input.json> --backend-json <BackendSpec> --json`: run an explicit backend adapter
 - `skill export <capability-or-tool> --json`: generate an agent-readable `SKILL.md`
@@ -69,6 +70,30 @@ The harness runs the corresponding `distill` command and writes a `distill-vault
 
 Distill capability metadata lives in `src/agent_tool_harness/capabilities.py` and is reused by both the registry and backend dispatch to avoid drift. See `docs/distill-vault-harness-runbook.md` for the self-use runbook.
 
+### Personal site capabilities
+
+Read/preview-oriented capabilities:
+
+```text
+site.status
+site.check-links
+```
+
+Write-capable capabilities:
+
+```text
+site.build
+site.deploy
+```
+
+All site inputs include a site path:
+
+```json
+{ "site": "/home/jarl/personal-site" }
+```
+
+`site.status` bundles repository/build readiness metadata. `site.check-links` scans generated `dist/**/*.html` local links and reports missing targets. `site.build` runs `npm run build`; `site.deploy` pushes `dist/` to `gh-pages` through the direct dist deploy path. Build/deploy are marked `external_write` and are blocked unless `--allow-external-write` is supplied.
+
 ## Backend adapters
 
 `run-backend` is the low-level adapter path for testing a backend without adding it to the registry yet:
@@ -107,6 +132,9 @@ agent-tool-harness doctor --all --json
 agent-tool-harness run xhs.generate-cards examples/github-trending.json --preview-dir /tmp/ath-preview --json
 printf '{"vault":"/home/jarl/all_in_one"}' > /tmp/distill-health-input.json
 agent-tool-harness run distill.health /tmp/distill-health-input.json --preview-dir /tmp/ath-preview --json
+printf '{"site":"/home/jarl/personal-site"}' > /tmp/site-input.json
+agent-tool-harness run site.status /tmp/site-input.json --preview-dir /tmp/ath-preview --json
+agent-tool-harness run site.check-links /tmp/site-input.json --preview-dir /tmp/ath-preview --json
 agent-tool-harness inspect /tmp/ath-preview/xhs-image-cards/<bundle-name> --json
 agent-tool-harness skill export xhs.generate-cards --json
 agent-tool-harness skill export distill-vault --json

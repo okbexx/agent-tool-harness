@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from .capabilities import DISTILL_CAPABILITY_SPECS, DistillCapabilitySpec
+from .capabilities import (
+    DISTILL_CAPABILITY_SPECS,
+    SITE_CAPABILITY_SPECS,
+    DistillCapabilitySpec,
+    SiteCapabilitySpec,
+)
 from .models import BackendSpec, Capability, HarnessTool
 
 
@@ -40,9 +45,36 @@ def _distill_capability(spec: DistillCapabilitySpec) -> Capability:
     )
 
 
+def _site_input_schema() -> dict:
+    return {
+        "type": "object",
+        "required": ["site"],
+        "properties": {
+            "site": {"type": "string", "description": "Path to the personal site repository."},
+            "timeout_seconds": {"type": "integer"},
+        },
+    }
+
+
+def _site_capability(spec: SiteCapabilitySpec) -> Capability:
+    return Capability(
+        id=spec.id,
+        name=spec.name,
+        summary=spec.summary,
+        input_schema=_site_input_schema(),
+        side_effect=spec.side_effect,
+        preview_protocol="preview-bundle/v1",
+        backend=BackendSpec(kind="python_function", target="run_site_command"),
+        examples=[
+            f"agent-tool-harness run {spec.id} site-input.json --preview-dir .preview --json"
+        ],
+    )
+
+
 DISTILL_CAPABILITIES = [
     _distill_capability(spec) for spec in DISTILL_CAPABILITY_SPECS.values()
 ]
+SITE_CAPABILITIES = [_site_capability(spec) for spec in SITE_CAPABILITY_SPECS.values()]
 
 DEFAULT_TOOLS = [
     HarnessTool(
@@ -101,6 +133,20 @@ DEFAULT_TOOLS = [
         side_effects={
             "doctor": "none",
             **{capability.id: capability.side_effect for capability in DISTILL_CAPABILITIES},
+        },
+    ),
+    HarnessTool(
+        name="personal-site",
+        display_name="Personal Site Harness",
+        category="site-ops",
+        description=(
+            "Operate Jarl's personal Astro site through inspectable preview bundles."
+        ),
+        capabilities=SITE_CAPABILITIES,
+        healthcheck="agent-tool-harness doctor personal-site --json",
+        side_effects={
+            "doctor": "none",
+            **{capability.id: capability.side_effect for capability in SITE_CAPABILITIES},
         },
     ),
 ]

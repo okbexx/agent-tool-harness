@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shlex
 import shutil
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
-from .capabilities import DISTILL_CAPABILITY_SPECS
+from .capabilities import DISTILL_CAPABILITY_SPECS, SITE_CAPABILITY_SPECS
 from .models import Artifact, BackendSpec, HarnessResponse
 from .registry import DEFAULT_TOOLS
 
@@ -227,6 +229,345 @@ def run_xhs_generate_cards(input_path: Path, preview_dir: Path | None = None) ->
 
 
 DISTILL_COMMANDS = DISTILL_CAPABILITY_SPECS
+SITE_COMMANDS = SITE_CAPABILITY_SPECS
+
+
+def site_path_from_input(data: dict[str, Any]) -> Path:
+    site_raw = data.get("site") or "."
+    site = Path(str(site_raw)).expanduser().resolve()
+    if not site.exists():
+        raise ValueError(f"Site path does not exist: {site}")
+    if not (site / "package.json").exists():
+        raise ValueError(f"Site path is missing package.json: {site}")
+    return site
+
+
+def collect_site_status(site: Path) -> dict[str, Any]:
+    package_json = json.loads((site / "package.json").read_text(encoding="utf-8"))
+    return {
+        "site": str(site),
+        "package_name": package_json.get("name"),
+        "has_package_json": True,
+        "has_node_modules": (site / "node_modules").exists(),
+        "has_dist": (site / "dist").exists(),
+        "build_script": (package_json.get("scripts") or {}).get("build"),
+    }
+
+
+def site_summary_headline(capability_id: str, payload: dict[str, Any]) -> str:
+    if capability_id == "site.status":
+        package_name = payload.get("package_name") or "site"
+        state = "ready" if payload.get("has_package_json") else "not ready"
+        return f"{capability_id}: {package_name} {state}"
+    if capability_id == "site.build":
+        state = "passed" if payload.get("returncode") == 0 else "failed"
+        return f"{capability_id}: build {state}"
+    if capability_id == "site.check-links":
+        broken = payload.get("broken_link_count", 0)
+        return f"{capability_id}: {broken} broken local link(s)"
+    if capability_id == "site.deploy":
+        return f"{capability_id}: pushed dist to gh-pages"
+    return f"{capability_id}: completed"
+
+
+def write_site_bundle(
+    capability_id: str,
+    input_path: Path,
+    input_data: dict[str, Any],
+    payload: dict[str, Any],
+    preview_dir: Path | None,
+) -> HarnessResponse:
+    spec = SITE_COMMANDS[capability_id]
+    preview_root = (preview_dir or Path(".preview")).expanduser().resolve()
+    safe_suffix = capability_id.removeprefix("site.").replace(".", "-")
+    hash_input = {"capability": capability_id, "input": input_data, "payload": payload}
+    short_hash = fingerprint(hash_input)[:8]
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    bundle_dir = preview_root / "personal-site" / f"{timestamp}_{short_hash}_{safe_suffix}"
+    artifacts_dir = bundle_dir / "artifacts"
+    artifacts_dir.mkdir(parents=True, exist_ok=False)
+
+    artifact_path = artifacts_dir / spec.artifact
+    artifact_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    summary = {
+        "headline": site_summary_headline(capability_id, payload),
+        "facts": payload,
+        "warnings": [],
+        "next_actions": [],
+    }
+    manifest = {
+        "protocol_version": "preview-bundle/v1",
+        "tool": "personal-site",
+        "capability": capability_id,
+        "status": "ok",
+        "created_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        "source": {
+            "input_path": str(input_path.expanduser().resolve()),
+            "input_fingerprint": f"sha256:{fingerprint(input_data)}",
+        },
+        "summary_path": "summary.json",
+        "artifacts": [
+            {
+                "id": spec.artifact.removesuffix(".json"),
+                "kind": "json",
+                "role": "site_result",
+                "path": str(artifact_path.relative_to(bundle_dir)),
+                "label": spec.artifact,
+            }
+        ],
+    }
+    (bundle_dir / "manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    (bundle_dir / "summary.json").write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    return HarnessResponse.success(
+        data={"bundle_dir": str(bundle_dir), "capability": capability_id, **payload},
+        artifacts=[Artifact(kind="preview_bundle", path=str(bundle_dir), role="output")],
+    )
+
+
+HREF_RE = re.compile(r"href=[\"']([^\"']+)[\"']")
+
+
+def local_href_target(dist_dir: Path, source_file: Path, href: str) -> Path | None:
+    if href.startswith("#") or href.startswith("mailto:") or href.startswith("tel:"):
+        return None
+    parsed = urlsplit(href)
+    if parsed.scheme or parsed.netloc:
+        return None
+    raw_path = parsed.path
+    if not raw_path:
+        return None
+    base_dir = dist_dir if raw_path.startswith("/") else source_file.parent
+    relative = raw_path.lstrip("/") if raw_path.startswith("/") else raw_path
+    target = (base_dir / relative).resolve()
+    if raw_path.endswith("/") or not target.suffix:
+        target = target / "index.html"
+    return target
+
+
+def collect_site_link_report(site: Path) -> dict[str, Any]:
+    dist_dir = site / "dist"
+    if not dist_dir.exists():
+        raise ValueError(f"Site dist directory does not exist: {dist_dir}")
+    checked_links: list[dict[str, str]] = []
+    broken_links: list[dict[str, str]] = []
+    html_paths = sorted(dist_dir.rglob("*.html"))
+    for html_path in html_paths:
+        source = html_path.relative_to(dist_dir).as_posix()
+        html = html_path.read_text(encoding="utf-8")
+        for href in HREF_RE.findall(html):
+            target = local_href_target(dist_dir, html_path, href)
+            if target is None:
+                continue
+            if not target.is_relative_to(dist_dir.resolve()):
+                broken_links.append({"source": source, "href": href, "target": "<outside-dist>"})
+                checked_links.append({"source": source, "href": href})
+                continue
+            target_rel = target.relative_to(dist_dir).as_posix()
+            checked_links.append({"source": source, "href": href, "target": target_rel})
+            if not target.exists():
+                broken_links.append({"source": source, "href": href, "target": target_rel})
+    return {
+        "site": str(site),
+        "dist": str(dist_dir),
+        "html_file_count": len(html_paths),
+        "checked_link_count": len(checked_links),
+        "broken_link_count": len(broken_links),
+        "checked_links": checked_links,
+        "broken_links": broken_links,
+    }
+
+
+def mask_remote_url(remote: str) -> str:
+    return re.sub(r"(https://[^:/@]+:)[^@]+(@)", r"\1***\2", remote)
+
+
+def run_site_subprocess(
+    command: list[str],
+    cwd: Path,
+    timeout_seconds: int,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        command,
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        timeout=timeout_seconds,
+        check=False,
+    )
+
+
+def deploy_site_dist(site: Path, timeout_seconds: int) -> dict[str, Any]:
+    dist_dir = site / "dist"
+    if not dist_dir.exists():
+        raise ValueError(f"Site dist directory does not exist: {dist_dir}")
+    remote_result = run_site_subprocess(
+        ["git", "remote", "get-url", "origin"],
+        cwd=site,
+        timeout_seconds=timeout_seconds,
+    )
+    if remote_result.returncode != 0:
+        raise RuntimeError(remote_result.stderr.strip() or "Could not read origin remote")
+    remote = remote_result.stdout.strip()
+    commands = [
+        ["git", "init"],
+        ["git", "add", "."],
+        ["git", "commit", "-m", "deploy: personal-site"],
+        ["git", "push", "-f", remote, "HEAD:gh-pages"],
+    ]
+    command_reports: list[dict[str, Any]] = []
+    git_dir = dist_dir / ".git"
+    if git_dir.exists():
+        shutil.rmtree(git_dir)
+    try:
+        for command in commands:
+            completed = run_site_subprocess(command, cwd=dist_dir, timeout_seconds=timeout_seconds)
+            command_reports.append(
+                {
+                    "command": [mask_remote_url(part) for part in command],
+                    "returncode": completed.returncode,
+                    "stdout": mask_remote_url(completed.stdout),
+                    "stderr": mask_remote_url(completed.stderr),
+                }
+            )
+            if completed.returncode != 0:
+                message = (
+                    completed.stderr.strip()
+                    or completed.stdout.strip()
+                    or f"Command failed: {command[0]}"
+                )
+                raise RuntimeError(message)
+    finally:
+        if git_dir.exists():
+            shutil.rmtree(git_dir)
+    return {
+        "site": str(site),
+        "dist": str(dist_dir),
+        "remote": mask_remote_url(remote),
+        "branch": "gh-pages",
+        "commands": command_reports,
+    }
+
+
+def run_site_command(
+    capability_id: str,
+    input_path: Path,
+    preview_dir: Path | None = None,
+) -> HarnessResponse:
+    if capability_id not in SITE_COMMANDS:
+        return HarnessResponse.failure(
+            "unknown_capability",
+            f"Unsupported capability: {capability_id}",
+            "Run registry list --json",
+        )
+    data = load_json(input_path)
+    try:
+        site = site_path_from_input(data)
+    except ValueError as exc:
+        return HarnessResponse.failure("invalid_input", str(exc))
+    if capability_id == "site.status":
+        return write_site_bundle(
+            capability_id=capability_id,
+            input_path=input_path,
+            input_data=data,
+            payload=collect_site_status(site),
+            preview_dir=preview_dir,
+        )
+    if capability_id == "site.build":
+        timeout_seconds = int(data.get("timeout_seconds") or 300)
+        try:
+            completed = subprocess.run(
+                ["npm", "run", "build"],
+                cwd=site,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return HarnessResponse.failure(
+                "backend_timeout",
+                f"site.build timed out after {timeout_seconds} seconds",
+                "Increase timeout_seconds or run npm run build directly for details",
+            )
+        except OSError as exc:
+            return HarnessResponse.failure(
+                "backend_launch_failed",
+                str(exc),
+                "Install npm dependencies or fix PATH before rerunning",
+            )
+        if completed.returncode != 0:
+            return HarnessResponse.failure(
+                "backend_failed",
+                completed.stderr.strip() or completed.stdout.strip() or "site.build failed",
+                "Run npm run build in the site repository for details",
+            )
+        payload = {
+            "site": str(site),
+            "command": "npm run build",
+            "returncode": completed.returncode,
+            "stdout": completed.stdout,
+            "stderr": completed.stderr,
+            "dist_exists": (site / "dist").exists(),
+        }
+        return write_site_bundle(
+            capability_id=capability_id,
+            input_path=input_path,
+            input_data=data,
+            payload=payload,
+            preview_dir=preview_dir,
+        )
+    if capability_id == "site.check-links":
+        try:
+            payload = collect_site_link_report(site)
+        except ValueError as exc:
+            return HarnessResponse.failure("invalid_input", str(exc))
+        return write_site_bundle(
+            capability_id=capability_id,
+            input_path=input_path,
+            input_data=data,
+            payload=payload,
+            preview_dir=preview_dir,
+        )
+    if capability_id == "site.deploy":
+        timeout_seconds = int(data.get("timeout_seconds") or 300)
+        try:
+            payload = deploy_site_dist(site, timeout_seconds=timeout_seconds)
+        except ValueError as exc:
+            return HarnessResponse.failure("invalid_input", str(exc))
+        except RuntimeError as exc:
+            return HarnessResponse.failure(
+                "backend_failed",
+                mask_remote_url(str(exc)),
+                "Run the deploy commands manually in the site repository for details",
+            )
+        except subprocess.TimeoutExpired:
+            return HarnessResponse.failure(
+                "backend_timeout",
+                f"site.deploy timed out after {timeout_seconds} seconds",
+                "Increase timeout_seconds or deploy the site manually",
+            )
+        except OSError as exc:
+            return HarnessResponse.failure(
+                "backend_launch_failed",
+                str(exc),
+                "Install git or fix PATH before rerunning",
+            )
+        return write_site_bundle(
+            capability_id=capability_id,
+            input_path=input_path,
+            input_data=data,
+            payload=payload,
+            preview_dir=preview_dir,
+        )
+    return HarnessResponse.failure(
+        "unknown_capability",
+        f"Unsupported capability: {capability_id}",
+        "Run registry list --json",
+    )
 
 
 def distill_command_args(capability_id: str, data: dict[str, Any]) -> list[str]:
@@ -651,6 +992,8 @@ def run_capability(
         return run_xhs_generate_cards(input_path=input_path, preview_dir=preview_dir)
     if capability_id in DISTILL_COMMANDS:
         return run_distill_command(capability_id, input_path=input_path, preview_dir=preview_dir)
+    if capability_id in SITE_COMMANDS:
+        return run_site_command(capability_id, input_path=input_path, preview_dir=preview_dir)
     return HarnessResponse.failure(
         "unknown_capability",
         f"Unsupported capability: {capability_id}",

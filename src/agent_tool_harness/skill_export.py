@@ -3,15 +3,34 @@ from __future__ import annotations
 from .models import Capability, HarnessTool
 
 
+def minimum_input_text(capability: Capability) -> str:
+    required = capability.input_schema.get("required") or []
+    labels = [f"`{name}`" for name in required]
+    if capability.id == "xhs.generate-cards":
+        labels = ["`trend_summary`", "`repos[]`"]
+    if not labels:
+        return "the fields required by the input schema"
+    if len(labels) == 1:
+        return labels[0]
+    return " and ".join([", ".join(labels[:-1]), labels[-1]])
+
+
+def verification_command(capability: Capability) -> str:
+    if capability.examples:
+        return capability.examples[0]
+    return (
+        f"agent-tool-harness run {capability.id} input.json "
+        "--preview-dir /tmp/agent-tool-harness-preview --json"
+    )
+
+
 def render_skill(tool: HarnessTool, capability: Capability) -> str:
     examples = "\n".join(
         f"{idx}. `{example}`" for idx, example in enumerate(capability.examples, 1)
     )
     lower_summary = capability.summary[0].lower() + capability.summary[1:]
-    verification_run = (
-        f"agent-tool-harness run {capability.id} examples/github-trending.json "
-        "--preview-dir /tmp/agent-tool-harness-preview --json"
-    )
+    verification_run = verification_command(capability)
+    minimum_shape = minimum_input_text(capability)
     return f"""---
 name: {tool.name}
 description: {tool.description}
@@ -23,7 +42,7 @@ Use when an agent needs to {lower_summary}
 
 ## Inputs
 Provide a JSON file matching the capability input schema.
-For `{capability.id}`, the minimum useful shape contains `trend_summary` and `repos[]`.
+For `{capability.id}`, the minimum useful shape contains {minimum_shape}.
 
 ## Commands
 {examples}
@@ -61,6 +80,56 @@ agent-tool-harness doctor --all --json
 """
 
 
+def tool_examples(tool: HarnessTool) -> str:
+    if tool.name == "distill-vault":
+        return """## Distill examples
+Route a knowledge task before reading or writing:
+
+```bash
+cat > /tmp/distill-route-input.json <<'JSON'
+{"vault":"/home/jarl/all_in_one","intent":"记录一个最小进展"}
+JSON
+ath run distill.route /tmp/distill-route-input.json --preview-dir .preview --json
+ath inspect <bundle-dir> --json
+```
+
+Search the vault:
+
+```bash
+cat > /tmp/distill-search-input.json <<'JSON'
+{"vault":"/home/jarl/all_in_one","query":"agent-tool-harness","limit":5}
+JSON
+ath run distill.search /tmp/distill-search-input.json --preview-dir .preview --json
+ath inspect <bundle-dir> --json
+```"""
+    if tool.name == "personal-site":
+        return """## Personal site examples
+Inspect repository status:
+
+```bash
+cat > /tmp/site-input.json <<'JSON'
+{"site":"/home/jarl/personal-site"}
+JSON
+ath run site.status /tmp/site-input.json --preview-dir .preview --json
+ath inspect <bundle-dir> --json
+```
+
+Check generated local links after a build:
+
+```bash
+ath run site.check-links /tmp/site-input.json --preview-dir .preview --json
+ath inspect <bundle-dir> --json
+```
+
+Build or deploy only after explicit approval:
+
+```bash
+ath run site.build /tmp/site-input.json --preview-dir .preview --allow-external-write --json
+ath run site.deploy /tmp/site-input.json --preview-dir .preview --allow-external-write --json
+```"""
+    return ""
+
+
 def render_tool_skill(tool: HarnessTool) -> str:
     capability_lines = "\n".join(
         f"- `{capability.id}`: {capability.summary} side_effect={capability.side_effect}"
@@ -76,6 +145,15 @@ def render_tool_skill(tool: HarnessTool) -> str:
         for capability in tool.capabilities
         if capability.side_effect == "external_write"
     )
+    first_write = next(
+        (
+            capability.id
+            for capability in tool.capabilities
+            if capability.side_effect == "external_write"
+        ),
+        "<external-write-capability>",
+    )
+    examples = tool_examples(tool)
     skill_name = f"{tool.name}-harness"
     return f"""---
 name: {skill_name}
@@ -117,29 +195,10 @@ Do not run external_write capabilities without explicit user approval.
 When approval is present, add `--allow-external-write`:
 
 ```bash
-ath run distill.capture input.json --preview-dir .preview --allow-external-write --json
+ath run {first_write} input.json --preview-dir .preview --allow-external-write --json
 ```
 
-## Distill examples
-Route a knowledge task before reading or writing:
-
-```bash
-cat > /tmp/distill-route-input.json <<'JSON'
-{{"vault":"/home/jarl/all_in_one","intent":"记录一个最小进展"}}
-JSON
-ath run distill.route /tmp/distill-route-input.json --preview-dir .preview --json
-ath inspect <bundle-dir> --json
-```
-
-Search the vault:
-
-```bash
-cat > /tmp/distill-search-input.json <<'JSON'
-{{"vault":"/home/jarl/all_in_one","query":"agent-tool-harness","limit":5}}
-JSON
-ath run distill.search /tmp/distill-search-input.json --preview-dir .preview --json
-ath inspect <bundle-dir> --json
-```
+{examples}
 
 ## JSON output
 All commands return the stable harness envelope:

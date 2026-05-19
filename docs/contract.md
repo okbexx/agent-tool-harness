@@ -138,6 +138,32 @@ Returned bundle shape:
 
 The harness keeps the vault read-only for this capability; the side effect is only writing the preview bundle.
 
+### Personal site capability family
+
+The harness exposes Jarl's Astro personal site operations as agent-callable capabilities. Every capability takes a JSON object with `site`:
+
+```json
+{
+  "site": "/home/jarl/personal-site"
+}
+```
+
+Read/preview-oriented capabilities:
+
+```text
+site.status
+site.check-links
+```
+
+Write-capable capabilities:
+
+```text
+site.build
+site.deploy
+```
+
+Each run writes a `preview-bundle/v1` under `.preview/personal-site/`. `site.status` emits `status.json`; `site.check-links` emits `check-links.json`; `site.build` emits `build.json`; `site.deploy` emits `deploy.json` with credential-bearing remotes masked. `site.build` and `site.deploy` are `external_write`, so the harness blocks them unless `--allow-external-write` is supplied.
+
 ## Capability backend metadata
 
 Each capability may declare an explicit backend record so agents can distinguish stable public contract from replaceable implementation detail:
